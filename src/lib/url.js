@@ -25,3 +25,10 @@ export function safeParseUrl(url) {
     return null;
   }
 }
+
+export function httpHostname(url) {
+  const parsed = safeParseUrl(url);
+  if (!parsed) return null;
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+  return parsed.hostname;
+}

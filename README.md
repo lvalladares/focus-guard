@@ -28,6 +28,11 @@ machine (no network calls except an optional custom wallpaper image).
 - **Motivational wallpapers** — five bundled SVG scenes plus a custom image URL option.
 - **Countdown overlay** with an "end session now" escape hatch for when you voluntarily
   get back to work.
+- **Stats tab** — hours per day, week, month and all-time per site, grouped by domain with
+  expandable subdomains, visits, share of tracked time and a one-click **Block** action that
+  drafts a blocking group from any time sink you discover. All counting is local, based on
+  which site is the active tab of the focused window; a "Block" quick action closes the
+  find → block loop.
 
 ## Install (load unpacked)
 
@@ -79,6 +84,19 @@ Specificity rules when several groups match the same host: exact host > wildcard
 wildcard beats a broader one; at equal specificity a `total` group wins. Sessions never
 override a more specific block. Whitelist allow-rules always outrank redirects.
 
+### Stats tracking
+
+The service worker tracks **segments**: continuous periods where a given hostname is the
+active tab of the focused window. Switching between tabs of the same site merges; navigating,
+switching windows (including to other apps, which reports `WINDOW_ID_NONE`) or closing the
+tab closes the segment. Segments are stored as per-day keys
+(`focusStats:YYYY-MM-DD` → `{host: {seconds, visits}}`), split across midnight, and
+checkpointed every minute so a crash loses at most ~60 seconds. Counting continues during
+doses (that is real time on site — the point is finding sinks), never counts non-`http(s)`
+pages (blocked pages stop the clock), and pauses nothing on idle by design — wall-clock
+focused-tab time. Day keys older than the configured retention (default 12 months) are
+pruned once per day. Stats can be toggled off and cleared from the Stats tab.
+
 ## First-run verification checklist
 
 Since this is personal software, run through this once after loading:
@@ -99,7 +117,10 @@ Since this is personal software, run through this once after loading:
 4. **Reflection** — inside your schedule, toggle blocking off in settings: the 30-second
    modal appears, the confirm button unlocks only at zero, and blocking resumes at the next
    window start.
-5. **Tests** — `npm test` should be fully green.
+5. **Stats** — browse a few sites, switch tabs, alt-tab out and back; within a minute the
+   Stats tab should show time accumulating against the right hosts (expand a domain to see
+   subdomains). Verify the **Block** button on a row drafts a group on the Sites tab.
+6. **Tests** — `npm test` should be fully green.
 
 ## Behavior notes
 

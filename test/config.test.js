@@ -4,12 +4,49 @@ import { defaultConfig, normalizeConfig, newGroupId } from '../src/lib/config.js
 describe('defaultConfig', () => {
   it('has the expected shape', () => {
     expect(defaultConfig()).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       master: { enabled: false },
       schedule: { windows: [] },
       groups: [],
       wallpaper: { mode: 'builtin', value: 'aurora' },
+      stats: { enabled: true, retentionMonths: 12 },
     });
+  });
+});
+
+describe('stats config normalization (v1 -> v2 migration)', () => {
+  it('fills stats defaults for legacy v1 configs', () => {
+    const legacy = {
+      schemaVersion: 1,
+      master: { enabled: true },
+      schedule: { windows: [{ days: [1], start: '09:00', end: '17:00' }] },
+      groups: [{ id: 'g1', domain: 'reddit.com', includeBaseHost: true, level: 'total' }],
+      wallpaper: { mode: 'builtin', value: 'minimal' },
+    };
+    const { config, errors } = normalizeConfig(legacy);
+    expect(errors).toEqual([]);
+    expect(config.schemaVersion).toBe(2);
+    expect(config.stats).toEqual({ enabled: true, retentionMonths: 12 });
+    expect(config.master.enabled).toBe(true);
+    expect(config.groups[0].domain).toBe('reddit.com');
+  });
+
+  it('coerces and clamps stats settings', () => {
+    const good = normalizeConfig({ stats: { enabled: false, retentionMonths: 6 } });
+    expect(good.config.stats).toEqual({ enabled: false, retentionMonths: 6 });
+
+    const bad = normalizeConfig({ stats: { enabled: 'yes', retentionMonths: -3 } });
+    expect(bad.config.stats).toEqual({ enabled: true, retentionMonths: 12 });
+    expect(bad.errors).toHaveLength(1);
+
+    const huge = normalizeConfig({ stats: { retentionMonths: 9999 } });
+    expect(huge.config.stats.retentionMonths).toBe(120);
+  });
+
+  it('keeps normalization idempotent with stats', () => {
+    const once = normalizeConfig({ stats: { enabled: false, retentionMonths: 6 } });
+    const twice = normalizeConfig(once.config);
+    expect(twice.config).toEqual(once.config);
   });
 });
 

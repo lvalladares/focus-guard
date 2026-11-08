@@ -1,8 +1,9 @@
 import { normalizeHostname, hostSpecsForGroup, compilePathGlob } from './patterns.js';
 import { normalizeWindows } from './schedule.js';
 import { WALLPAPERS, DEFAULT_WALLPAPER_ID } from './wallpapers.js';
+import { STATS } from './constants.js';
 
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 export function defaultConfig() {
   return {
@@ -11,6 +12,7 @@ export function defaultConfig() {
     schedule: { windows: [] },
     groups: [],
     wallpaper: { mode: 'builtin', value: DEFAULT_WALLPAPER_ID },
+    stats: { enabled: true, retentionMonths: STATS.DEFAULT_RETENTION_MONTHS },
   };
 }
 
@@ -106,6 +108,17 @@ function normalizeGroup(raw, index, errors, seenExact, seenWildcard) {
   return group;
 }
 
+function normalizeStats(raw, errors) {
+  const enabled = raw && typeof raw.enabled === 'boolean' ? raw.enabled : true;
+  let retentionMonths = Number(raw && raw.retentionMonths);
+  if (!Number.isFinite(retentionMonths) || retentionMonths < 1) {
+    if (raw && raw.retentionMonths != null) errors.push('stats: Retention must be at least 1 month, using default');
+    retentionMonths = STATS.DEFAULT_RETENTION_MONTHS;
+  }
+  retentionMonths = Math.min(120, Math.round(retentionMonths));
+  return { enabled, retentionMonths };
+}
+
 export function normalizeConfig(raw) {
   const errors = [];
   if (!raw || typeof raw !== 'object') {
@@ -125,6 +138,7 @@ export function normalizeConfig(raw) {
   scheduleErrors.forEach((e) => errors.push(`schedule window ${e.index + 1}: ${e.error}`));
 
   const wallpaper = normalizeWallpaper(raw.wallpaper, errors);
+  const stats = normalizeStats(raw.stats, errors);
 
   const config = {
     schemaVersion: CURRENT_SCHEMA_VERSION,
@@ -132,6 +146,7 @@ export function normalizeConfig(raw) {
     schedule: { windows },
     groups,
     wallpaper,
+    stats,
   };
 
   return { config, errors };

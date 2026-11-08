@@ -29,7 +29,14 @@
       <div class="status-grid" id="status-extra"></div>
     </section>
 
-    <section class="card">
+    <nav class="tabs" id="tabs">
+      <button class="tab on" data-tab="sites" type="button">Sites</button>
+      <button class="tab" data-tab="schedule" type="button">Schedule</button>
+      <button class="tab" data-tab="wallpaper" type="button">Wallpaper</button>
+      <button class="tab" data-tab="stats" type="button">Stats</button>
+    </nav>
+
+    <section class="card" data-tab-section="sites">
       <div class="section-head">
         <h2>Distracting sites</h2>
         <div class="add-domain">
@@ -42,7 +49,7 @@
       <div class="muted small empty-hint" id="groups-empty">No sites blocked yet. Add the first one above — you know the one.</div>
     </section>
 
-    <section class="card">
+    <section class="card" data-tab-section="schedule" hidden>
       <div class="section-head">
         <h2>Focus schedule</h2>
         <button class="btn" id="btn-clear-schedule">Clear all</button>
@@ -51,7 +58,7 @@
       <div id="schedule-editor"></div>
     </section>
 
-    <section class="card">
+    <section class="card" data-tab-section="wallpaper" hidden>
       <h2>Wallpaper</h2>
       <div class="wallpaper-grid" id="wallpaper-grid"></div>
       <div class="custom-wallpaper">
@@ -60,6 +67,39 @@
           <input type="url" id="custom-wallpaper-url" placeholder="https://…/your-wallpaper.jpg">
           <button class="btn" id="btn-custom-wallpaper">Use this URL</button>
         </div>
+      </div>
+    </section>
+
+    <section class="card" data-tab-section="stats" hidden>
+      <div class="section-head">
+        <h2>Time tracked</h2>
+        <div class="stats-periods" id="stats-periods">
+          <button class="tabpill on" data-period="today" type="button">Today</button>
+          <button class="tabpill" data-period="week" type="button">This week</button>
+          <button class="tabpill" data-period="month" type="button">This month</button>
+          <button class="tabpill" data-period="all" type="button">All time</button>
+        </div>
+      </div>
+      <p class="muted small">Hours spent per site, counted while it is the active tab of the focused window. Expand a domain to see its subdomains — then block the time sinks.</p>
+      <div class="stats-toolbar">
+        <input type="text" id="stats-search" placeholder="Filter sites…" autocomplete="off">
+        <button class="btn btn-danger" id="btn-clear-stats" type="button">Clear stats</button>
+      </div>
+      <p class="muted small" id="stats-summary"></p>
+      <div id="stats-table" class="stats-table"></div>
+      <div class="stats-settings">
+        <label class="check-row">
+          <input type="checkbox" id="stats-collect">
+          <span>Collect browsing stats <span class="muted">— local only, never uploaded</span></span>
+        </label>
+        <label class="check-row">
+          <span>Keep history</span>
+          <select id="stats-retention">
+            <option value="6">6 months</option>
+            <option value="12">12 months</option>
+            <option value="24">24 months</option>
+          </select>
+        </label>
       </div>
     </section>
 

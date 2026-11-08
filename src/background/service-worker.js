@@ -4,7 +4,10 @@ import { reconcile, startSession, isOverrideActive } from '../lib/sessions.js';
 import { evaluate } from '../lib/decision.js';
 import { isWithinSchedule, scheduleBlockingEnd, nextScheduleChange } from '../lib/schedule.js';
 import { groupMatchPatterns } from '../lib/patterns.js';
-import { FREE_TIME_OPTIONS, COOLDOWN_MS, STORAGE_KEYS, PAGES } from '../lib/constants.js';
+import { createSegmentTracker } from '../lib/stats-tracker.js';
+import { createStatsStorage } from '../lib/stats-storage.js';
+import { httpHostname } from '../lib/url.js';
+import { FREE_TIME_OPTIONS, COOLDOWN_MS, STORAGE_KEYS, PAGES, STATS } from '../lib/constants.js';
 import { safeParseUrl } from '../lib/url.js';
 
 const CONFIG_KEY = STORAGE_KEYS.CONFIG;
@@ -135,6 +138,102 @@ async function openSettings() {
   }
 }
 
+const statsStorage = createStatsStorage({ storage: chrome.storage.local });
+const segmentTracker = createSegmentTracker();
+
+let statsReadyPromise = null;
+let statsEnabled = true;
+let focusedWindowId = null;
+
+function ensureStatsReady() {
+  if (!statsReadyPromise) {
+    statsReadyPromise = initStats().catch((error) => {
+      statsReadyPromise = null;
+      console.error('Focus Guard: stats init failed', error);
+    });
+  }
+  return statsReadyPromise;
+}
+
+async function initStats() {
+  const { config } = await readState();
+  statsEnabled = Boolean(config.stats && config.stats.enabled);
+  const session = await chrome.storage.session.get(STATS.OPEN_KEY);
+  if (session[STATS.OPEN_KEY]) segmentTracker.restoreCurrent(session[STATS.OPEN_KEY]);
+  try {
+    const window = await chrome.windows.getLastFocused();
+    focusedWindowId = window ? window.id : null;
+  } catch {
+    focusedWindowId = null;
+  }
+}
+
+async function statsFlush(emissions) {
+  if (!emissions || emissions.length === 0) return;
+  try {
+    await statsStorage.flush(emissions);
+  } catch (error) {
+    console.error('Focus Guard: stats flush failed', error);
+  }
+}
+
+async function persistOpenSegment() {
+  try {
+    const current = segmentTracker.getCurrent();
+    if (current) await chrome.storage.session.set({ [STATS.OPEN_KEY]: current });
+    else await chrome.storage.session.remove(STATS.OPEN_KEY);
+  } catch {
+    /* session storage unavailable */
+  }
+}
+
+async function statsFocusTab(tabId, windowId) {
+  await ensureStatsReady();
+  if (!statsEnabled) return;
+  let hostname = null;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    hostname = httpHostname(tab.url);
+  } catch {
+    hostname = null;
+  }
+  focusedWindowId = windowId;
+  const emissions = segmentTracker.handleFocus({ hostname, tabId, windowId, time: Date.now() });
+  await persistOpenSegment();
+  await statsFlush(emissions);
+}
+
+async function statsTick() {
+  await ensureStatsReady();
+  if (!statsEnabled) return;
+  const time = Date.now();
+  const current = segmentTracker.getCurrent();
+  if (current) {
+    let tab = null;
+    try {
+      [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    } catch {
+      tab = null;
+    }
+    const hostname = tab ? httpHostname(tab.url) : null;
+    if (!tab || hostname !== current.hostname) {
+      const emissions = segmentTracker.handleBlur(time);
+      await persistOpenSegment();
+      await statsFlush(emissions);
+      return;
+    }
+  }
+  const emissions = segmentTracker.checkpoint(time);
+  await persistOpenSegment();
+  await statsFlush(emissions);
+}
+
+async function disableStatsTracking() {
+  const emissions = segmentTracker.handleBlur(Date.now());
+  await persistOpenSegment();
+  await statsFlush(emissions);
+}
+
 async function handleMessage(msg) {
   switch (msg && msg.type) {
     case 'state:get': {
@@ -259,12 +358,69 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.alarms.onAlarm.addListener(() => {
+  statsTick();
   sync();
 });
 
-chrome.storage.onChanged.addListener((changes, area) => {
+chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+  statsFocusTab(tabId, windowId);
+});
+
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (!changeInfo.url) return;
+  await ensureStatsReady();
+  if (!statsEnabled) return;
+  if (!tab || !tab.active || tab.windowId !== focusedWindowId) return;
+  const emissions = segmentTracker.handleFocus({ hostname: httpHostname(changeInfo.url), tabId, windowId: tab.windowId, time: Date.now() });
+  await persistOpenSegment();
+  await statsFlush(emissions);
+});
+
+chrome.windows.onFocusChanged.addListener(async (windowId) => {
+  await ensureStatsReady();
+  focusedWindowId = windowId;
+  if (!statsEnabled) return;
+  const time = Date.now();
+  if (windowId === chrome.windows.WINDOW_ID_NONE) {
+    const emissions = segmentTracker.handleBlur(time);
+    await persistOpenSegment();
+    await statsFlush(emissions);
+    return;
+  }
+  let tab = null;
+  try {
+    [tab] = await chrome.tabs.query({ active: true, windowId });
+  } catch {
+    tab = null;
+  }
+  const hostname = tab ? httpHostname(tab.url) : null;
+  const emissions = segmentTracker.handleFocus({ hostname, tabId: tab ? tab.id : null, windowId, time });
+  await persistOpenSegment();
+  await statsFlush(emissions);
+});
+
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  await ensureStatsReady();
+  if (!statsEnabled) return;
+  const emissions = segmentTracker.handleTabRemoved(tabId, Date.now());
+  if (emissions.length === 0) return;
+  await persistOpenSegment();
+  await statsFlush(emissions);
+});
+
+chrome.storage.onChanged.addListener(async (changes, area) => {
   if (area !== 'local') return;
-  if (changes[CONFIG_KEY]) sync();
+  if (changes[CONFIG_KEY]) {
+    if (statsReadyPromise) {
+      const { config } = normalizeConfig(changes[CONFIG_KEY].newValue);
+      const enabled = Boolean(config.stats && config.stats.enabled);
+      if (enabled !== statsEnabled) {
+        statsEnabled = enabled;
+        if (!enabled) await disableStatsTracking();
+      }
+    }
+    sync();
+  }
 });
 
 chrome.action.onClicked.addListener(() => {

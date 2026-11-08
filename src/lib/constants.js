@@ -10,6 +10,15 @@ export const STORAGE_KEYS = {
   RUNTIME: 'focusRuntime',
 };
 
+export const STATS = {
+  DAY_KEY_PREFIX: 'focusStats:',
+  META_KEY: 'focusStats:meta',
+  OPEN_KEY: 'focusStatsOpen',
+  DEFAULT_RETENTION_MONTHS: 12,
+};
+
+export const STATS_PERIODS = ['today', 'week', 'month', 'all'];
+
 export const PAGES = {
   BLOCKED: '/src/pages/blocked/blocked.html',
   GATE: '/src/pages/gate/gate.html',

@@ -6,17 +6,25 @@ import {
   collectScheduleFromDom,
   escapeHtml,
 } from './settings-logic.js';
+import { buildStatsModel, statsTableHtml, formatHours } from './stats-logic.js';
 import { normalizeConfig, defaultConfig, newGroupId } from '../../lib/config.js';
 import { formatDuration, formatClockTime } from '../../lib/format.js';
 import { WALLPAPERS } from '../../lib/wallpapers.js';
 import { formatTime, DAY_LABELS } from '../../lib/schedule.js';
-import { STORAGE_KEYS } from '../../lib/constants.js';
+import { periodStart, dayKeysBetween } from '../../lib/dates.js';
+import { createStatsStorage } from '../../lib/stats-storage.js';
+import { STORAGE_KEYS, STATS, STATS_PERIODS } from '../../lib/constants.js';
 
 const storage = chrome.storage.local;
+const statsStorage = createStatsStorage({ storage });
 
 let config = defaultConfig();
 let runtime = { sessions: {}, cooldowns: {}, override: null };
 let dirty = false;
+let activeTab = 'sites';
+let statsPeriod = 'today';
+let statsQuery = '';
+let statsExpanded = new Set();
 
 function sendMessage(msg) {
   return new Promise((resolve) => {
@@ -45,6 +53,72 @@ function renderAll() {
   renderGroups();
   renderSchedule();
   renderWallpaper();
+  renderStatsSettings();
+}
+
+function activateTab(name) {
+  if (!['sites', 'schedule', 'wallpaper', 'stats'].includes(name)) name = 'sites';
+  activeTab = name;
+  document.querySelectorAll('#tabs .tab').forEach((tab) => {
+    tab.classList.toggle('on', tab.dataset.tab === name);
+  });
+  document.querySelectorAll('[data-tab-section]').forEach((section) => {
+    section.hidden = section.dataset.tabSection !== name;
+  });
+  el('btn-save').parentElement.classList.toggle('hidden', name === 'stats' || name === 'wallpaper');
+  if (location.hash !== `#${name}`) location.hash = name;
+  if (name === 'stats') renderStats();
+}
+
+async function renderStats() {
+  const buckets = await loadStatsBuckets(statsPeriod);
+  const model = buildStatsModel(buckets, { query: statsQuery, config });
+  model.domains = model.domains.map((d) => ({ ...d, expanded: statsExpanded.has(d.domain) }));
+  el('stats-table').innerHTML = statsTableHtml(model);
+  const summary = model.siteCount > 0
+    ? `Tracked ${formatHours(model.totalSeconds)} · ${model.siteCount} ${model.siteCount === 1 ? 'site' : 'sites'} · ${model.totalVisits} ${model.totalVisits === 1 ? 'visit' : 'visits'}${statsQuery ? ' (filtered)' : ''}`
+    : '';
+  el('stats-summary').textContent = summary;
+}
+
+async function loadStatsBuckets(period) {
+  if (period === 'all') return statsStorage.queryAll();
+  const start = periodStart(period, new Date());
+  const keys = dayKeysBetween(start, new Date());
+  return statsStorage.queryDayKeys(keys);
+}
+
+function renderStatsSettings() {
+  const stats = config.stats || { enabled: true, retentionMonths: 12 };
+  el('stats-collect').checked = Boolean(stats.enabled);
+  el('stats-retention').value = String(stats.retentionMonths);
+}
+
+async function onQuickBlock(domain) {
+  const draft = collectDraft();
+  if (draft.config.groups.some((g) => g.domain === domain)) {
+    activateTab('sites');
+    return;
+  }
+  draft.config.groups.push({
+    id: newGroupId(),
+    domain,
+    includeBaseHost: true,
+    includeAllSubdomains: false,
+    subdomains: [],
+    whitelist: [],
+    level: 'total',
+  });
+  config = draft.config;
+  renderGroups();
+  markDirty();
+  activateTab('sites');
+  const card = document.querySelector(`.group[data-group-id="${config.groups[config.groups.length - 1].id}"]`);
+  if (card) {
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.classList.add('flash');
+    setTimeout(() => card.classList.remove('flash'), 1600);
+  }
 }
 
 function renderStatus() {
@@ -297,6 +371,57 @@ async function onMasterToggle() {
 }
 
 function wireEvents() {
+  el('tabs').addEventListener('click', (event) => {
+    const tab = event.target.closest('.tab');
+    if (tab) activateTab(tab.dataset.tab);
+  });
+
+  el('stats-periods').addEventListener('click', (event) => {
+    const pill = event.target.closest('.tabpill');
+    if (!pill) return;
+    statsPeriod = STATS_PERIODS.includes(pill.dataset.period) ? pill.dataset.period : 'today';
+    document.querySelectorAll('#stats-periods .tabpill').forEach((p) => {
+      p.classList.toggle('on', p === pill);
+    });
+    renderStats();
+  });
+
+  el('stats-search').addEventListener('input', (event) => {
+    statsQuery = event.target.value.trim();
+    renderStats();
+  });
+
+  el('stats-table').addEventListener('click', async (event) => {
+    const expander = event.target.closest('[data-expand]');
+    if (expander) {
+      const domain = expander.dataset.expand;
+      if (statsExpanded.has(domain)) statsExpanded.delete(domain);
+      else statsExpanded.add(domain);
+      renderStats();
+      return;
+    }
+    const blockButton = event.target.closest('[data-block-domain]');
+    if (blockButton) {
+      await onQuickBlock(blockButton.dataset.blockDomain);
+    }
+  });
+
+  el('btn-clear-stats').addEventListener('click', async () => {
+    if (!window.confirm('Delete all tracked browsing stats? This cannot be undone.')) return;
+    await statsStorage.clear();
+    renderStats();
+  });
+
+  el('stats-collect').addEventListener('change', async (event) => {
+    const result = await persistConfig({ ...config, stats: { ...config.stats, enabled: event.target.checked } });
+    if (result.ok) renderStatsSettings();
+  });
+
+  el('stats-retention').addEventListener('change', async (event) => {
+    const result = await persistConfig({ ...config, stats: { ...config.stats, retentionMonths: Number(event.target.value) } });
+    if (result.ok) renderStatsSettings();
+  });
+
   el('btn-add-domain').addEventListener('click', onAddDomain);
   el('new-domain').addEventListener('keydown', (event) => {
     if (event.key === 'Enter') onAddDomain();
@@ -397,6 +522,10 @@ function wireEvents() {
       await loadState();
       renderStatus();
     }
+    const statsChanged = Object.keys(changes).some((key) => key.startsWith(STATS.DAY_KEY_PREFIX));
+    if (statsChanged && activeTab === 'stats') {
+      renderStats();
+    }
   });
 }
 
@@ -421,7 +550,11 @@ async function init() {
   await loadState();
   renderAll();
   wireEvents();
+  activateTab((location.hash || '#sites').slice(1));
   setInterval(renderStatus, 1000);
+  setInterval(() => {
+    if (activeTab === 'stats') renderStats();
+  }, 60000);
 }
 
 init();

@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "Personal focus companion: blocks distracting sites with motivational wallpapers, timed doses and a focus schedule.",
   "minimum_chrome_version": "116",
-  "permissions": ["declarativeNetRequest", "storage", "alarms", "tabs"],
+  "permissions": ["declarativeNetRequest", "storage", "alarms", "tabs", "unlimitedStorage"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "src/background/service-worker.js",
