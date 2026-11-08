@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Focus Guard — Settings</title>
+  <link rel="stylesheet" href="settings.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="brand-mark"></span>
+        <span>Focus Guard</span>
+      </div>
+      <div class="master">
+        <span id="master-label">Blocking</span>
+        <button id="master-toggle" class="toggle" role="switch" aria-checked="false">
+          <span class="toggle-knob"></span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="page">
+    <section class="card status-card" id="status-card">
+      <h2 id="status-title">Focus mode</h2>
+      <p id="status-subtitle" class="muted"></p>
+      <div class="status-grid" id="status-extra"></div>
+    </section>
+
+    <section class="card">
+      <div class="section-head">
+        <h2>Distracting sites</h2>
+        <div class="add-domain">
+          <input type="text" id="new-domain" placeholder="example.com" spellcheck="false" autocomplete="off">
+          <button class="btn btn-primary" id="btn-add-domain">Add</button>
+        </div>
+      </div>
+      <p class="muted small">Bare domains block only that exact host. Add specific subdomains or enable the wildcard to cover <code>*.domain</code>. Grouped hosts share one blocking level, doses and cooldowns. Whitelisted paths are always allowed.</p>
+      <div id="groups-list"></div>
+      <div class="muted small empty-hint" id="groups-empty">No sites blocked yet. Add the first one above — you know the one.</div>
+    </section>
+
+    <section class="card">
+      <div class="section-head">
+        <h2>Focus schedule</h2>
+        <button class="btn" id="btn-clear-schedule">Clear all</button>
+      </div>
+      <p class="muted small">While the schedule is active, blocking turns itself on and turning it off requires a 30-second reflection. Windows may cross midnight (e.g. 22:00 → 06:00).</p>
+      <div id="schedule-editor"></div>
+    </section>
+
+    <section class="card">
+      <h2>Wallpaper</h2>
+      <div class="wallpaper-grid" id="wallpaper-grid"></div>
+      <div class="custom-wallpaper">
+        <label for="custom-wallpaper-url">Custom image URL</label>
+        <div class="custom-wallpaper-row">
+          <input type="url" id="custom-wallpaper-url" placeholder="https://…/your-wallpaper.jpg">
+          <button class="btn" id="btn-custom-wallpaper">Use this URL</button>
+        </div>
+      </div>
+    </section>
+
+    <div class="save-row">
+      <button class="btn btn-primary btn-lg" id="btn-save">Save changes</button>
+      <span id="save-status" class="muted"></span>
+    </div>
+  </main>
+
+  <script type="module" src="settings.js"></script>
+</body>
+</html>

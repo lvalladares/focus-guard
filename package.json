@@ -1,0 +1,19 @@
+{
+  "name": "focus-guard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Personal focus companion: blocks distracting sites with motivational wallpapers, timed doses and a focus schedule.",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "icons": "node scripts/gen-icons.js"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.14.0",
+    "eslint": "^9.14.0",
+    "jsdom": "^25.0.1",
+    "vitest": "^2.1.4"
+  }
+}

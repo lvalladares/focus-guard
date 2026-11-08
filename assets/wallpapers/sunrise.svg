@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1a1040"/>
+      <stop offset="0.45" stop-color="#7a2e6d"/>
+      <stop offset="0.75" stop-color="#e0705a"/>
+      <stop offset="1" stop-color="#f7b267"/>
+    </linearGradient>
+    <radialGradient id="sunGlow" cx="0.68" cy="0.62" r="0.5">
+      <stop offset="0" stop-color="#ffe8b0" stop-opacity="0.9"/>
+      <stop offset="0.4" stop-color="#ffb37a" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#ffb37a" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="ridge1" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5b2a5e"/>
+      <stop offset="1" stop-color="#3a1a48"/>
+    </linearGradient>
+    <linearGradient id="ridge2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3d1c44"/>
+      <stop offset="1" stop-color="#261233"/>
+    </linearGradient>
+    <linearGradient id="ridge3" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#241028"/>
+      <stop offset="1" stop-color="#150920"/>
+    </linearGradient>
+  </defs>
+  <rect width="1600" height="900" fill="url(#sky)"/>
+  <rect width="1600" height="900" fill="url(#sunGlow)"/>
+  <circle cx="1080" cy="560" r="72" fill="#ffdf9e" opacity="0.95"/>
+  <path d="M0,600 L260,470 L430,560 L620,430 L820,550 L950,480 L1150,590 L1350,500 L1600,570 L1600,900 L0,900 Z" fill="url(#ridge1)"/>
+  <path d="M0,700 L200,600 L420,670 L650,580 L880,680 L1100,600 L1320,670 L1600,610 L1600,900 L0,900 Z" fill="url(#ridge2)"/>
+  <path d="M0,810 L300,720 L560,800 L840,710 L1120,800 L1380,730 L1600,780 L1600,900 L0,900 Z" fill="url(#ridge3)"/>
+</svg>

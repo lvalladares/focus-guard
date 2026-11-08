@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>How much free time? — Focus Guard</title>
+  <link rel="stylesheet" href="../focus-page.css">
+  <link rel="stylesheet" href="gate.css">
+</head>
+<body>
+  <div class="wallpaper"><img id="wallpaper-img" alt=""></div>
+  <main class="stage">
+    <div class="card">
+      <p class="eyebrow">Focus Guard</p>
+      <h1>How much free time do you have?</h1>
+      <p class="detail" id="detail"></p>
+      <div class="doses">
+        <button class="dose" data-minutes="10">
+          <span class="dose-value">10</span>
+          <span class="dose-label">minutes</span>
+        </button>
+        <button class="dose" data-minutes="20">
+          <span class="dose-value">20</span>
+          <span class="dose-label">minutes</span>
+        </button>
+        <button class="dose" data-minutes="30">
+          <span class="dose-value">30</span>
+          <span class="dose-label">minutes</span>
+        </button>
+      </div>
+      <p class="warning" id="warning"></p>
+      <p class="quote" id="quote"></p>
+      <p class="quote-author" id="quote-author"></p>
+      <div class="actions">
+        <button class="btn btn-primary" id="btn-dismiss">Nope — back to work</button>
+      </div>
+    </div>
+  </main>
+  <script type="module" src="gate-main.js"></script>
+</body>
+</html>

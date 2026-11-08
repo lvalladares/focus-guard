@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#dfe9dd"/>
+      <stop offset="0.6" stop-color="#bcd4bd"/>
+      <stop offset="1" stop-color="#9dbfa4"/>
+    </linearGradient>
+    <linearGradient id="fog1" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#eef4ec" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#eef4ec" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#eef4ec" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="treesFar" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6e937c"/>
+      <stop offset="1" stop-color="#5a7d68"/>
+    </linearGradient>
+    <linearGradient id="treesMid" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3f5e4e"/>
+      <stop offset="1" stop-color="#2f4a3d"/>
+    </linearGradient>
+    <linearGradient id="treesNear" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#22362d"/>
+      <stop offset="1" stop-color="#16241e"/>
+    </linearGradient>
+  </defs>
+  <rect width="1600" height="900" fill="url(#sky)"/>
+  <g fill="url(#treesFar)">
+    <path d="M100,520 L130,420 L160,520 Z"/><path d="M125,520 L160,380 L195,520 Z"/><path d="M190,520 L222,430 L254,520 Z"/>
+    <path d="M480,510 L515,395 L550,510 Z"/><path d="M545,510 L575,420 L605,510 Z"/>
+    <path d="M900,515 L935,400 L970,515 Z"/><path d="M965,515 L1000,425 L1035,515 Z"/><path d="M1030,515 L1062,410 L1094,515 Z"/>
+    <path d="M1330,510 L1368,390 L1406,510 Z"/><path d="M1400,510 L1432,415 L1464,510 Z"/>
+  </g>
+  <rect x="0" y="490" width="1600" height="40" fill="url(#fog1)"/>
+  <g fill="url(#treesMid)">
+    <path d="M40,650 L85,510 L130,650 Z"/><path d="M115,650 L170,480 L225,650 Z"/><path d="M210,650 L255,520 L300,650 Z"/>
+    <path d="M620,640 L670,490 L720,640 Z"/><path d="M700,640 L745,515 L790,640 Z"/>
+    <path d="M1090,645 L1140,500 L1190,645 Z"/><path d="M1170,645 L1218,525 L1266,645 Z"/>
+    <path d="M1480,640 L1530,495 L1580,640 Z"/>
+  </g>
+  <rect x="0" y="600" width="1600" height="50" fill="url(#fog1)" opacity="0.7"/>
+  <g fill="url(#treesNear)">
+    <path d="M300,820 L365,630 L430,820 Z"/><path d="M410,820 L470,650 L530,820 Z"/>
+    <path d="M830,830 L900,640 L970,830 Z"/><path d="M940,830 L1000,660 L1060,830 Z"/>
+    <path d="M1280,825 L1345,635 L1410,825 Z"/>
+  </g>
+  <rect x="0" y="790" width="1600" height="60" fill="url(#fog1)" opacity="0.5"/>
+</svg>

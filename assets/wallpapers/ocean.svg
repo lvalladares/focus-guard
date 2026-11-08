@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#02182c"/>
+      <stop offset="0.5" stop-color="#053e5c"/>
+      <stop offset="1" stop-color="#0a6d8c"/>
+    </linearGradient>
+    <radialGradient id="moonGlow" cx="0.24" cy="0.28" r="0.4">
+      <stop offset="0" stop-color="#dffbff" stop-opacity="0.8"/>
+      <stop offset="1" stop-color="#dffbff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="wave1" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0b7d9e"/>
+      <stop offset="1" stop-color="#065a78"/>
+    </linearGradient>
+    <linearGradient id="wave2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#085f80"/>
+      <stop offset="1" stop-color="#043d59"/>
+    </linearGradient>
+    <linearGradient id="wave3" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#043a56"/>
+      <stop offset="1" stop-color="#022438"/>
+    </linearGradient>
+  </defs>
+  <rect width="1600" height="900" fill="url(#sky)"/>
+  <rect width="1600" height="900" fill="url(#moonGlow)"/>
+  <circle cx="390" cy="250" r="46" fill="#eafcff" opacity="0.9"/>
+  <path d="M0,540 C220,500 360,570 560,540 C760,510 900,580 1100,550 C1300,520 1450,570 1600,545 L1600,900 L0,900 Z" fill="url(#wave1)"/>
+  <path d="M0,660 C260,620 420,700 680,665 C940,630 1120,700 1360,668 C1480,652 1560,672 1600,664 L1600,900 L0,900 Z" fill="url(#wave2)"/>
+  <path d="M0,790 C300,750 520,820 800,788 C1080,756 1280,816 1600,780 L1600,900 L0,900 Z" fill="url(#wave3)"/>
+  <g fill="#bff1ff" opacity="0.25">
+    <path d="M430,300 q6,-14 12,0 q-6,4 -12,0"/>
+    <path d="M470,278 q5,-11 10,0 q-5,3 -10,0"/>
+  </g>
+</svg>

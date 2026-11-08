@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#05070f"/>
+      <stop offset="0.55" stop-color="#0a1030"/>
+      <stop offset="1" stop-color="#0d1b3e"/>
+    </linearGradient>
+    <linearGradient id="ribbon1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2de2a3" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#2de2a3" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#2de2a3" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="ribbon2" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#4f7cff" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#4f7cff" stop-opacity="0.4"/>
+      <stop offset="1" stop-color="#4f7cff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="ribbon3" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#9b6bff" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#9b6bff" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#9b6bff" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="blur" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="40"/>
+    </filter>
+    <linearGradient id="mountainFar" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#101a3c"/>
+      <stop offset="1" stop-color="#070c1e"/>
+    </linearGradient>
+    <linearGradient id="mountainNear" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#060a18"/>
+      <stop offset="1" stop-color="#02040c"/>
+    </linearGradient>
+  </defs>
+  <rect width="1600" height="900" fill="url(#sky)"/>
+  <g fill="#ffffff">
+    <circle cx="120" cy="90" r="1.6" opacity="0.9"/>
+    <circle cx="310" cy="60" r="1.1" opacity="0.6"/>
+    <circle cx="520" cy="140" r="1.4" opacity="0.8"/>
+    <circle cx="760" cy="70" r="1.0" opacity="0.5"/>
+    <circle cx="980" cy="120" r="1.7" opacity="0.9"/>
+    <circle cx="1180" cy="50" r="1.2" opacity="0.7"/>
+    <circle cx="1390" cy="160" r="1.5" opacity="0.8"/>
+    <circle cx="1500" cy="80" r="1.0" opacity="0.5"/>
+    <circle cx="220" cy="220" r="1.1" opacity="0.5"/>
+    <circle cx="640" cy="260" r="1.3" opacity="0.6"/>
+    <circle cx="1050" cy="240" r="1.0" opacity="0.5"/>
+    <circle cx="1320" cy="300" r="1.4" opacity="0.6"/>
+    <circle cx="430" cy="40" r="1.0" opacity="0.6"/>
+  </g>
+  <g filter="url(#blur)">
+    <path d="M0,520 C300,300 500,620 800,430 C1050,280 1300,520 1600,380 L1600,700 L0,700 Z" fill="url(#ribbon1)"/>
+    <path d="M0,600 C350,420 600,700 900,520 C1150,380 1400,620 1600,480 L1600,760 L0,760 Z" fill="url(#ribbon2)"/>
+    <path d="M0,330 C280,180 560,420 860,260 C1120,120 1380,340 1600,220 L1600,560 L0,560 Z" fill="url(#ribbon3)"/>
+  </g>
+  <path d="M0,640 L180,560 L330,610 L470,530 L640,620 L820,540 L980,600 L1160,520 L1330,590 L1600,510 L1600,900 L0,900 Z" fill="url(#mountainFar)"/>
+  <path d="M0,760 L220,660 L400,730 L600,640 L820,720 L1020,630 L1240,710 L1420,650 L1600,700 L1600,900 L0,900 Z" fill="url(#mountainNear)"/>
+</svg>
