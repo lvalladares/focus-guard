@@ -1,11 +1,12 @@
 import { createGateController } from './gate.js';
 import { wallpaperSrc } from '../../lib/wallpapers.js';
 import { PAGES } from '../../lib/constants.js';
+import { createSplitStorage } from '../../lib/config-storage.js';
 
 createGateController({
   document,
   location: window.location,
-  storage: chrome.storage.local,
+  storage: createSplitStorage({ sync: chrome.storage.sync, local: chrome.storage.local }),
   now: () => Date.now(),
   navigate: (url) => window.location.replace(url),
   historyBack: () => {

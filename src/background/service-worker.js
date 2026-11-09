@@ -3,6 +3,7 @@ import { buildRules, diffRules } from '../lib/rules-builder.js';
 import { reconcile, startSession, isOverrideActive } from '../lib/sessions.js';
 import { evaluate } from '../lib/decision.js';
 import { isWithinSchedule, scheduleBlockingEnd, nextScheduleChange } from '../lib/schedule.js';
+import { createConfigStorage } from '../lib/config-storage.js';
 import { groupMatchPatterns } from '../lib/patterns.js';
 import { createSegmentTracker } from '../lib/stats-tracker.js';
 import { createStatsStorage } from '../lib/stats-storage.js';
@@ -13,14 +14,18 @@ import { safeParseUrl } from '../lib/url.js';
 const CONFIG_KEY = STORAGE_KEYS.CONFIG;
 const RUNTIME_KEY = STORAGE_KEYS.RUNTIME;
 
+const configStorage = createConfigStorage({ sync: chrome.storage.sync, local: chrome.storage.local });
+
 let syncing = false;
 let syncQueued = false;
 
 async function readState() {
-  const store = await chrome.storage.local.get([CONFIG_KEY, RUNTIME_KEY]);
-  const { config } = normalizeConfig(store[CONFIG_KEY]);
-  const runtime = store[RUNTIME_KEY] || { sessions: {}, cooldowns: {}, override: null };
-  return { config, runtime };
+  const config = await configStorage.getConfig();
+  const store = await chrome.storage.local.get([RUNTIME_KEY]);
+  return {
+    config: normalizeConfig(config).config,
+    runtime: store[RUNTIME_KEY] || { sessions: {}, cooldowns: {}, override: null },
+  };
 }
 
 async function persistRuntime(runtime) {
@@ -243,7 +248,7 @@ async function handleMessage(msg) {
     case 'config:save': {
       const { config, errors } = normalizeConfig(msg.config);
       if (errors.length > 0) return { ok: false, errors };
-      await chrome.storage.local.set({ [CONFIG_KEY]: config });
+      await configStorage.setConfig(config);
       await sync();
       return { ok: true, config };
     }
@@ -313,7 +318,7 @@ async function handleMessage(msg) {
         return { ok: true };
       }
       const nextConfig = { ...config, master: { enabled: Boolean(msg.enabled) } };
-      await chrome.storage.local.set({ [CONFIG_KEY]: nextConfig });
+      await configStorage.setConfig(nextConfig);
       await sync();
       return { ok: true };
     }
@@ -343,9 +348,9 @@ async function handleMessage(msg) {
 }
 
 chrome.runtime.onInstalled.addListener(async (details) => {
-  const store = await chrome.storage.local.get(CONFIG_KEY);
-  if (!store[CONFIG_KEY]) {
-    await chrome.storage.local.set({ [CONFIG_KEY]: defaultConfig() });
+  const config = await configStorage.getConfig();
+  if (!config) {
+    await configStorage.setConfig(defaultConfig());
   }
   await sync();
   if (details.reason === 'install') {
@@ -408,18 +413,25 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   await statsFlush(emissions);
 });
 
-chrome.storage.onChanged.addListener(async (changes, area) => {
-  if (area !== 'local') return;
-  if (changes[CONFIG_KEY]) {
-    if (statsReadyPromise) {
-      const { config } = normalizeConfig(changes[CONFIG_KEY].newValue);
-      const enabled = Boolean(config.stats && config.stats.enabled);
-      if (enabled !== statsEnabled) {
-        statsEnabled = enabled;
-        if (!enabled) await disableStatsTracking();
-      }
+async function onConfigChanged(nextConfig) {
+  if (statsReadyPromise) {
+    const { config } = normalizeConfig(nextConfig);
+    const enabled = Boolean(config.stats && config.stats.enabled);
+    if (enabled !== statsEnabled) {
+      statsEnabled = enabled;
+      if (!enabled) await disableStatsTracking();
     }
-    sync();
+  }
+  sync();
+}
+
+chrome.storage.onChanged.addListener(async (changes, area) => {
+  if (area === 'sync' && changes[CONFIG_KEY]) {
+    await onConfigChanged(changes[CONFIG_KEY].newValue);
+    return;
+  }
+  if (area === 'local' && changes[CONFIG_KEY]) {
+    await onConfigChanged(changes[CONFIG_KEY].newValue);
   }
 });
 

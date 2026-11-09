@@ -12,11 +12,13 @@ import { formatDuration, formatClockTime } from '../../lib/format.js';
 import { WALLPAPERS } from '../../lib/wallpapers.js';
 import { formatTime, DAY_LABELS } from '../../lib/schedule.js';
 import { periodStart, dayKeysBetween } from '../../lib/dates.js';
+import { createConfigStorage } from '../../lib/config-storage.js';
 import { createStatsStorage } from '../../lib/stats-storage.js';
 import { STORAGE_KEYS, STATS, STATS_PERIODS } from '../../lib/constants.js';
 
 const storage = chrome.storage.local;
 const statsStorage = createStatsStorage({ storage });
+const configStorage = createConfigStorage({ sync: chrome.storage.sync, local: chrome.storage.local });
 
 let config = defaultConfig();
 let runtime = { sessions: {}, cooldowns: {}, override: null };
@@ -39,8 +41,9 @@ function sendMessage(msg) {
 }
 
 async function loadState() {
-  const store = await storage.get([STORAGE_KEYS.CONFIG, STORAGE_KEYS.RUNTIME]);
-  config = store[STORAGE_KEYS.CONFIG] || defaultConfig();
+  const storedConfig = await configStorage.getConfig();
+  const store = await storage.get([STORAGE_KEYS.RUNTIME]);
+  config = storedConfig || defaultConfig();
   runtime = store[STORAGE_KEYS.RUNTIME] || { sessions: {}, cooldowns: {}, override: null };
 }
 
@@ -517,6 +520,15 @@ function wireEvents() {
   });
 
   chrome.storage.onChanged.addListener(async (changes, area) => {
+    if (area === 'sync' && changes[STORAGE_KEYS.CONFIG]) {
+      if (dirty) return;
+      await loadState();
+      renderGroups();
+      renderSchedule();
+      renderWallpaper();
+      renderStatsSettings();
+      return;
+    }
     if (area !== 'local') return;
     if (changes[STORAGE_KEYS.RUNTIME]) {
       await loadState();

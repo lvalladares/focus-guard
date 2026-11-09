@@ -34,6 +34,40 @@ machine (no network calls except an optional custom wallpaper image).
   which site is the active tab of the focused window; a "Block" quick action closes the
   find → block loop.
 
+## Install on multiple computers (same Chrome profile)
+
+Chrome never syncs unpacked extensions themselves — each machine needs a one-time setup:
+
+```sh
+git clone https://github.com/<you>/focus-guard.git
+```
+
+then `chrome://extensions` → Developer mode → **Load unpacked** → select the folder
+(and keep Developer mode enabled so the extension survives restarts).
+
+Everything you *configure* follows you automatically: the extension ID is pinned via a
+manifest `key` (`hffobnhgmbdcecdimkncpbobbkhpokge` — same on every machine), and the
+configuration lives in `chrome.storage.sync`, so blocked sites, schedule, wallpaper and
+stats settings propagate to every computer signed into the same Chrome profile with sync
+enabled. Change your block list on your desktop; your laptop picks it up within seconds and
+rebuilds its blocking rules. Stats, active doses, cooldowns and the master/override state
+stay per machine.
+
+Notes:
+
+- Requires the profile's Chrome sync to be enabled (the `chrome.storage.sync` data type —
+  it syncs even if the "Extensions" sync toggle is off).
+- Synced config is capped at 8 KB per item by Chrome — that is roughly hundreds of blocked
+  groups; if a save ever exceeds it, the settings page will surface the storage error.
+- To script the setup on a new machine you can also launch Chrome with
+  `--load-extension=/path/to/focus-guard` instead of clicking through `chrome://extensions`.
+- The RSA private key matching the pinned ID is at `~/focus-guard-extension-key.pem`
+  (never commit it). It is only needed if you ever package a CRX or publish to the store;
+  unpacked installs use the public key in the manifest.
+- Installing this version over a pre-sync install changes the extension ID, so an earlier
+  manual configuration will need to be re-entered once (the same fixed ID applies from
+  now on).
+
 ## Install (load unpacked)
 
 1. Install dev tooling (only needed for tests/lint, not for running the extension):

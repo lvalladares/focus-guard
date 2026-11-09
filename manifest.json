@@ -2,6 +2,7 @@
   "manifest_version": 3,
   "name": "Focus Guard",
   "version": "0.1.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxWhz/pBOmdyte0c9Szq3OWNOLUdsHP0hoAv1klXgMbujrc84dhIrPuaOgpAhhBHYWphHP6OMtn7cwvmuf1ARMYdf2m+z3fxaLNGUVZsXplcdB62DMn9Th4iimk0EK0E0BMDwdAI0rAjR794JIueDn7kYjZu5T1PgVnsAOnEXWFATK4qvVqemrbVqAioB/C5YguW6DloANGC4rl2eIBFknxZS0dVdq3OObpiOYjtgia5Nx/CERNVCaOvAn5+H787T/IcvDPDOpxKdtlwHJrlBF5koiBA4snblPjoRN3hZvjaxm7ekC0ufy2xKeyYpT/5kLtFJt0auJh/4JULJ/DZ/jwIDAQAB",
   "description": "Personal focus companion: blocks distracting sites with motivational wallpapers, timed doses and a focus schedule.",
   "minimum_chrome_version": "116",
   "permissions": ["declarativeNetRequest", "storage", "alarms", "tabs", "unlimitedStorage"],
