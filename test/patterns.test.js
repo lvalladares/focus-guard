@@ -22,6 +22,14 @@ describe('normalizeHostname', () => {
   it('extracts host from pasted URLs', () => {
     expect(normalizeHostname('https://reddit.com/r/productivity')).toEqual({ ok: true, hostname: 'reddit.com' });
     expect(normalizeHostname('reddit.com/r/productivity')).toEqual({ ok: true, hostname: 'reddit.com' });
+    expect(normalizeHostname('http://www.reddit.com/r/productivity?x=1')).toEqual({ ok: true, hostname: 'reddit.com' });
+  });
+
+  it('drops the www prefix so both spellings normalize alike', () => {
+    expect(normalizeHostname('www.reddit.com')).toEqual({ ok: true, hostname: 'reddit.com' });
+    expect(normalizeHostname('WWW.Reddit.com')).toEqual({ ok: true, hostname: 'reddit.com' });
+    expect(normalizeHostname('www.old.reddit.com')).toEqual({ ok: true, hostname: 'old.reddit.com' });
+    expect(normalizeHostname('www.com')).toEqual({ ok: true, hostname: 'www.com' });
   });
 
   it('strips ports and trailing dots', () => {
@@ -73,19 +81,29 @@ describe('hostSpecsForGroup', () => {
   });
 });
 
-describe('hostnameMatchesSpec (literal semantics)', () => {
-  it('exact host matches only that host', () => {
+describe('hostnameMatchesSpec (www-tolerant semantics)', () => {
+  it('exact host matches itself and the www twin', () => {
     const spec = { kind: 'exact', host: 'reddit.com' };
     expect(hostnameMatchesSpec('reddit.com', spec)).toBe(true);
+    expect(hostnameMatchesSpec('www.reddit.com', spec)).toBe(true);
     expect(hostnameMatchesSpec('old.reddit.com', spec)).toBe(false);
-    expect(hostnameMatchesSpec('www.reddit.com', spec)).toBe(false);
+    expect(hostnameMatchesSpec('www.old.reddit.com', spec)).toBe(false);
     expect(hostnameMatchesSpec('evilreddit.com', spec)).toBe(false);
+  });
+
+  it('a www-prefixed spec matches both spellings', () => {
+    const spec = { kind: 'exact', host: 'www.reddit.com' };
+    expect(hostnameMatchesSpec('www.reddit.com', spec)).toBe(true);
+    expect(hostnameMatchesSpec('reddit.com', spec)).toBe(true);
+    expect(hostnameMatchesSpec('old.reddit.com', spec)).toBe(false);
+    expect(hostnameMatchesSpec('www.old.reddit.com', { kind: 'exact', host: 'old.reddit.com' })).toBe(true);
   });
 
   it('wildcard matches subdomains of any depth but not the bare domain', () => {
     const spec = { kind: 'wildcard', base: 'reddit.com' };
     expect(hostnameMatchesSpec('old.reddit.com', spec)).toBe(true);
     expect(hostnameMatchesSpec('a.b.reddit.com', spec)).toBe(true);
+    expect(hostnameMatchesSpec('www.reddit.com', spec)).toBe(true);
     expect(hostnameMatchesSpec('reddit.com', spec)).toBe(false);
     expect(hostnameMatchesSpec('notreddit.com', spec)).toBe(false);
     expect(hostnameMatchesSpec('reddit.com.evil.io', spec)).toBe(false);
@@ -169,6 +187,20 @@ describe('compilePathGlob and pathMatchesGlob', () => {
     expect(compilePathGlob(`/${'a'.repeat(200)}`).ok).toBe(false);
     expect(compilePathGlob('/bad\npath').ok).toBe(false);
   });
+
+  it('accepts a pasted URL or host+path without a scheme', () => {
+    expect(compilePathGlob('https://reddit.com/r/learn*')).toEqual({
+      ok: true, source: '/r/learn.*', exactPrefix: false, normalized: '/r/learn*',
+    });
+    expect(compilePathGlob('http://reddit.com/mail')).toMatchObject({ ok: true, normalized: '/mail' });
+    expect(compilePathGlob('www.reddit.com/r/learn')).toMatchObject({ ok: true, normalized: '/r/learn' });
+    expect(compilePathGlob('reddit.com:8080/r/learn?x=1#top')).toMatchObject({ ok: true, normalized: '/r/learn' });
+  });
+
+  it('refuses a pasted URL with no path', () => {
+    expect(compilePathGlob('https://reddit.com').ok).toBe(false);
+    expect(compilePathGlob('reddit.com').ok).toBe(false);
+  });
 });
 
 describe('isWhitelistedUrl', () => {
@@ -185,21 +217,32 @@ describe('isWhitelistedUrl', () => {
 });
 
 describe('regex sources', () => {
-  it('exact host regex matches the host, any port and path', () => {
+  it('exact host regex matches the host with or without www, any port and path', () => {
     const re = new RegExp(`^(${exactHostsRegexSource(['reddit.com', 'old.reddit.com'])})$`);
     expect(re.test('https://reddit.com')).toBe(true);
     expect(re.test('https://reddit.com/')).toBe(true);
     expect(re.test('https://reddit.com:8080/r/x')).toBe(true);
     expect(re.test('http://old.reddit.com/r/x')).toBe(true);
+    expect(re.test('https://www.reddit.com/')).toBe(true);
+    expect(re.test('http://www.reddit.com/r/x')).toBe(true);
+    expect(re.test('https://www.old.reddit.com/r/x')).toBe(true);
     expect(re.test('https://evilreddit.com/')).toBe(false);
     expect(re.test('https://reddit.com.evil.io/')).toBe(false);
-    expect(re.test('https://www.reddit.com/')).toBe(false);
+    expect(re.test('https://www.reddit.com.evil.io/')).toBe(false);
+    expect(re.test('https://old.reddit.com.evil.io/')).toBe(false);
+  });
+
+  it('www-prefixed hosts from a legacy config normalize into the same alternation', () => {
+    const re = new RegExp(`^(${exactHostsRegexSource(['www.reddit.com'])})$`);
+    expect(re.test('https://www.reddit.com/r/x')).toBe(true);
+    expect(re.test('https://reddit.com/r/x')).toBe(true);
   });
 
   it('wildcard regex matches subdomains only', () => {
     const re = new RegExp(`^(${wildcardHostRegexSource('reddit.com')})$`);
     expect(re.test('https://old.reddit.com/')).toBe(true);
     expect(re.test('https://a.b.reddit.com/')).toBe(true);
+    expect(re.test('https://www.reddit.com/')).toBe(true);
     expect(re.test('https://reddit.com/')).toBe(false);
     expect(re.test('https://xreddit.com/')).toBe(false);
     expect(re.test('https://.reddit.com/')).toBe(false);
@@ -223,6 +266,12 @@ describe('groupMatchPatterns', () => {
       includeAllSubdomains: true,
       subdomains: ['old.reddit.com'],
     });
-    expect(patterns).toEqual(['*://reddit.com/*', '*://old.reddit.com/*', '*://*.reddit.com/*']);
+    expect(patterns).toEqual([
+      '*://reddit.com/*',
+      '*://www.reddit.com/*',
+      '*://old.reddit.com/*',
+      '*://www.old.reddit.com/*',
+      '*://*.reddit.com/*',
+    ]);
   });
 });

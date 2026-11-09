@@ -12,6 +12,9 @@ machine (no network calls except an optional custom wallpaper image).
 
 - **Domain groups** — one entry per site family (e.g. `reddit.com`). Block the bare domain
   (exact host only), specific subdomains, or every subdomain via `*.domain` — all in one group.
+  Entries take a bare domain, a subdomain or a pasted URL — no `https://` required — and
+  matching is scheme- and www-agnostic: `example.com` covers `http`/`https` on both
+  `example.com` and `www.example.com`.
 - **Blocking levels**
   - `total` — 100% blocked while Focus Guard is active.
   - `partial` — the gate page asks how much free time you have: **10 / 20 / 30 minutes**.
@@ -20,7 +23,7 @@ machine (no network calls except an optional custom wallpaper image).
 - **Cooldown** — after a dose ends, re-entering the site is refused for **10 minutes**
   ("you already had your dose").
 - **Whitelisted paths** — glob patterns (e.g. `/r/learn*`) that are always allowed, even for
-  totally blocked sites.
+  totally blocked sites. Paste a URL (`reddit.com/r/learn`) and only its path is kept.
 - **Focus schedule** — per weekday, multiple time ranges, overnight windows allowed
   (`22:00 → 06:00`). Inside the window blocking is always on; turning it off requires a
   30-second confirmation with rotating motivational quotes, and it re-enables itself at the

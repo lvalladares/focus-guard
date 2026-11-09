@@ -45,10 +45,21 @@ describe('buildRules', () => {
     expect(rules).toHaveLength(1);
     const rule = rules[0];
     expect(rule.priority).toBe(1000);
-    expect(rule.condition.regexFilter).toBe('^(https?://(?:reddit\\.com)(?:[/:].*)?)$');
+    expect(rule.condition.regexFilter).toBe('^(https?://(?:www\\.)?(?:reddit\\.com)(?:[/:].*)?)$');
     expect(rule.condition.resourceTypes).toEqual(['main_frame']);
     expect(rule.action.type).toBe('redirect');
     expect(rule.action.redirect.regexSubstitution).toBe(`chrome-extension://${EXT_ID}/src/pages/blocked/blocked.html#\\1`);
+  });
+
+  it('covers http/https and www/non-www for a bare domain', () => {
+    const rules = buildRules({ config: config([group()]), runtime: runtime(), now: NOW, extensionId: EXT_ID });
+    const re = new RegExp(rules[0].condition.regexFilter, 'i');
+    expect(re.test('https://reddit.com/')).toBe(true);
+    expect(re.test('http://reddit.com/r/x')).toBe(true);
+    expect(re.test('https://www.reddit.com/')).toBe(true);
+    expect(re.test('http://www.reddit.com:8080/r/x')).toBe(true);
+    expect(re.test('https://www.reddit.com.evil.io/')).toBe(false);
+    expect(re.test('https://old.reddit.com/')).toBe(false);
   });
 
   it('redirects partial groups to the gate page', () => {
@@ -97,7 +108,7 @@ describe('buildRules', () => {
     const [allow, redirect] = [...rules].sort((a, b) => b.priority - a.priority);
     expect(allow.action).toEqual({ type: 'allow' });
     expect(allow.priority).toBe(1003);
-    expect(allow.condition.regexFilter).toBe('^https?://(?:reddit\\.com)(?::\\d+)?(?:/docs(?:\\/.*)?)(?:\\?.*)?$');
+    expect(allow.condition.regexFilter).toBe('^https?://(?:www\\.)?(?:reddit\\.com)(?::\\d+)?(?:/docs(?:\\/.*)?)(?:\\?.*)?$');
     expect(redirect.priority).toBe(1000);
   });
 
@@ -216,6 +227,13 @@ describe('rules-builder matches evaluate (consistency)', () => {
     'https://reddit.com/help/me',
     'https://reddit.com.evil.io/',
     'http://reddit.com/',
+    'https://www.reddit.com/',
+    'http://www.reddit.com/r/productivity',
+    'https://www.reddit.com:8080/r/x',
+    'https://www.old.reddit.com/r/nostalgia',
+    'https://www.reddit.com/docs/api',
+    'https://www.reddit.com/help/me',
+    'https://www.reddit.com.evil.io/',
   ];
 
   for (const scenario of scenarios) {

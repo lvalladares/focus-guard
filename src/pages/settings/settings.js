@@ -8,6 +8,7 @@ import {
 } from './settings-logic.js';
 import { buildStatsModel, statsTableHtml, formatHours } from './stats-logic.js';
 import { normalizeConfig, defaultConfig, newGroupId } from '../../lib/config.js';
+import { normalizeHostname, compilePathGlob } from '../../lib/patterns.js';
 import { formatDuration, formatClockTime } from '../../lib/format.js';
 import { WALLPAPERS } from '../../lib/wallpapers.js';
 import { formatTime, DAY_LABELS } from '../../lib/schedule.js';
@@ -43,7 +44,10 @@ function sendMessage(msg) {
 async function loadState() {
   const storedConfig = await configStorage.getConfig();
   const store = await storage.get([STORAGE_KEYS.RUNTIME]);
-  config = storedConfig || defaultConfig();
+  // Normalize on load so legacy entries (e.g. `www.`-prefixed hosts or pasted URLs
+  // saved by an older version) display — and are edited — in canonical form, exactly
+  // like what the service worker enforces.
+  config = storedConfig ? normalizeConfig(storedConfig).config : defaultConfig();
   runtime = store[STORAGE_KEYS.RUNTIME] || { sessions: {}, cooldowns: {}, override: null };
 }
 
@@ -98,14 +102,20 @@ function renderStatsSettings() {
 }
 
 async function onQuickBlock(domain) {
+  const parsed = normalizeHostname(domain);
+  const host = parsed.ok ? parsed.hostname : domain;
   const draft = collectDraft();
-  if (draft.config.groups.some((g) => g.domain === domain)) {
+  const alreadyGrouped = draft.config.groups.some((g) => {
+    const existing = normalizeHostname(g.domain);
+    return existing.ok ? existing.hostname === host : g.domain === host;
+  });
+  if (alreadyGrouped) {
     activateTab('sites');
     return;
   }
   draft.config.groups.push({
     id: newGroupId(),
-    domain,
+    domain: host,
     includeBaseHost: true,
     includeAllSubdomains: false,
     subdomains: [],
@@ -199,7 +209,7 @@ function groupHtml(group) {
       <div class="group-options">
         <label class="check-row">
           <input type="checkbox" class="group-include-base" ${group.includeBaseHost ? 'checked' : ''}>
-          <span>Block <code>${domain || 'domain'}</code> itself <span class="muted">— exact host only</span></span>
+          <span>Block <code>${domain || 'domain'}</code> itself <span class="muted">— exact host, www twin included</span></span>
         </label>
         <label class="check-row">
           <input type="checkbox" class="group-include-subdomains" ${group.includeAllSubdomains ? 'checked' : ''}>
@@ -218,7 +228,7 @@ function groupHtml(group) {
         <label>Whitelisted paths — always allowed</label>
         <div class="chips">
           ${whitelistChips}
-          <input type="text" class="chip-input" data-chip-kind="whitelist" placeholder="/r/learn*" spellcheck="false" autocomplete="off">
+          <input type="text" class="chip-input" data-chip-kind="whitelist" placeholder="/r/learn* or paste a URL" spellcheck="false" autocomplete="off">
           <button type="button" class="btn chip-add" data-action="add-chip">Add</button>
         </div>
       </div>
@@ -282,6 +292,11 @@ function markDirty() {
   el('save-status').className = 'muted';
 }
 
+function showStatus(message, className = 'save-error') {
+  el('save-status').textContent = message;
+  el('save-status').className = className;
+}
+
 async function persistConfig(nextConfig) {
   const { config: normalized, errors } = normalizeConfig(nextConfig);
   if (errors.length > 0) return { ok: false, errors };
@@ -326,12 +341,22 @@ async function saveAll() {
 
 async function onAddDomain() {
   const input = el('new-domain');
-  const value = input.value.trim();
-  if (!value) return;
+  const raw = input.value.trim();
+  if (!raw) return;
+  const parsed = normalizeHostname(raw);
+  if (!parsed.ok) {
+    showStatus(`"${raw}" is not a valid host — ${parsed.error}`);
+    return;
+  }
+  const domain = parsed.hostname;
   const draft = collectDraft();
+  if (draft.config.groups.some((g) => normalizeHostname(g.domain).hostname === domain)) {
+    showStatus(`${domain} is already in a group`);
+    return;
+  }
   draft.config.groups.push({
     id: newGroupId(),
-    domain: value,
+    domain,
     includeBaseHost: true,
     includeAllSubdomains: false,
     subdomains: [],
@@ -342,6 +367,7 @@ async function onAddDomain() {
   input.value = '';
   renderGroups();
   markDirty();
+  showStatus(`Added ${domain} — covers http/https and www/non-www (unsaved)`, 'save-ok');
 }
 
 async function onMasterToggle() {
@@ -543,9 +569,34 @@ function wireEvents() {
 
 function addChipFromInput(input) {
   if (!input) return;
-  const value = input.value.trim();
-  if (!value) return;
+  const raw = input.value.trim();
+  if (!raw) return;
   const kind = input.dataset.chipKind;
+  let value = raw;
+
+  if (kind === 'subdomain') {
+    const parsed = normalizeHostname(raw);
+    if (!parsed.ok) {
+      showStatus(`"${raw}" is not a valid host — ${parsed.error}`);
+      return;
+    }
+    value = parsed.hostname;
+    const card = input.closest('.group');
+    const domainInput = card && card.querySelector('.group-domain');
+    const groupDomain = domainInput ? normalizeHostname(domainInput.value) : null;
+    if (groupDomain && groupDomain.ok && groupDomain.hostname === value) {
+      showStatus(`${value} is already covered by this group's host`);
+      return;
+    }
+  } else if (kind === 'whitelist') {
+    const parsed = compilePathGlob(raw);
+    if (!parsed.ok) {
+      showStatus(`"${raw}" is not a valid path — ${parsed.error}`);
+      return;
+    }
+    value = parsed.normalized;
+  }
+
   const chips = input.parentElement.querySelectorAll(`.chip[data-kind="${kind}"]`);
   for (const chip of chips) {
     if (chip.dataset.value === value) {
