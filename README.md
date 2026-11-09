@@ -121,6 +121,13 @@ Specificity rules when several groups match the same host: exact host > wildcard
 wildcard beats a broader one; at equal specificity a `total` group wins. Sessions never
 override a more specific block. Whitelist allow-rules always outrank redirects.
 
+Open tabs converge with the rules on every sync, in both directions: tabs already sitting
+on blocked sites are pulled to the block/gate pages (so turning blocking on also blocks
+tabs that were open before), and tabs parked on those pages are sent back to their
+original URL once it is allowed again — blocking turned off, a dose running, a path
+whitelisted, a group removed. Gate pages manage their own navigation while a dose starts,
+so they are left alone then.
+
 ### Stats tracking
 
 The service worker tracks **segments**: continuous periods where a given hostname is the
@@ -154,10 +161,15 @@ Since this is personal software, run through this once after loading:
 4. **Reflection** — inside your schedule, toggle blocking off in settings: the 30-second
    modal appears, the confirm button unlocks only at zero, and blocking resumes at the next
    window start.
-5. **Stats** — browse a few sites, switch tabs, alt-tab out and back; within a minute the
+5. **Open-tab convergence** — with the site open in a tab *before* turning blocking on,
+   flip the master switch on: the open tab should be pulled to the block page within a
+   second. Flip blocking off again (outside the schedule, or via the reflection): the
+   parked tab should return to the site. Starting a dose should bring back the parked
+   tabs of that group as well.
+6. **Stats** — browse a few sites, switch tabs, alt-tab out and back; within a minute the
    Stats tab should show time accumulating against the right hosts (expand a domain to see
    subdomains). Verify the **Block** button on a row drafts a group on the Sites tab.
-6. **Tests** — `npm test` should be fully green.
+7. **Tests** — `npm test` should be fully green.
 
 ## Behavior notes
 

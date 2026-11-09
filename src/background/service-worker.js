@@ -5,6 +5,7 @@ import { evaluate } from '../lib/decision.js';
 import { isWithinSchedule, scheduleBlockingEnd, nextScheduleChange } from '../lib/schedule.js';
 import { createConfigStorage } from '../lib/config-storage.js';
 import { groupMatchPatterns } from '../lib/patterns.js';
+import { planSweep, planRestore } from '../lib/tab-sweep.js';
 import { createSegmentTracker } from '../lib/stats-tracker.js';
 import { createStatsStorage } from '../lib/stats-storage.js';
 import { httpHostname } from '../lib/url.js';
@@ -53,28 +54,53 @@ function blockedUrlFor(url) {
   return `${chrome.runtime.getURL(PAGES.BLOCKED)}#${encodeURIComponent(url)}`;
 }
 
-async function sweepGroupTabs(groupId, config, runtime) {
-  const group = config.groups.find((g) => g.id === groupId);
-  if (!group) return;
-  const patterns = groupMatchPatterns(group);
-  let tabs = [];
+function gateUrlFor(url) {
+  return `${chrome.runtime.getURL(PAGES.GATE)}#${encodeURIComponent(url)}`;
+}
+
+function redirectFor(url, verdict) {
+  return verdict === 'gate' ? gateUrlFor(url) : blockedUrlFor(url);
+}
+
+async function redirectTab(action) {
   try {
-    tabs = await chrome.tabs.query({ url: patterns });
+    await chrome.tabs.update(action.tabId, { url: action.url });
   } catch (error) {
-    console.error('Focus Guard: tab sweep failed', error);
-    return;
+    console.error('Focus Guard: tab redirect failed', error);
   }
-  const now = Date.now();
-  for (const tab of tabs) {
-    if (!tab.url || !tab.id) continue;
-    const result = evaluate({ url: tab.url, now, config, runtime });
-    if (result.verdict === 'block' || result.verdict === 'cooldown') {
-      try {
-        await chrome.tabs.update(tab.id, { url: blockedUrlFor(tab.url) });
-      } catch (error) {
-        console.error('Focus Guard: tab redirect failed', error);
+}
+
+// Keeps open tabs in sync with the current blocking state, both ways:
+// - tabs sitting on blocked sites are pulled to the block/gate pages (so turning blocking
+//   on also blocks tabs that were already open), and
+// - tabs parked on those pages are sent back to their original URL once it is allowed
+//   again (blocking turned off, a dose running, a path whitelisted, a group removed).
+async function convergeTabs(config, runtime, now) {
+  const patterns = [...new Set((config.groups || []).flatMap(groupMatchPatterns))];
+  if (patterns.length > 0) {
+    try {
+      const tabs = await chrome.tabs.query({ url: patterns });
+      for (const action of planSweep(tabs, { config, runtime, now, redirectFor })) {
+        await redirectTab(action);
       }
+    } catch (error) {
+      console.error('Focus Guard: tab sweep failed', error);
     }
+  }
+  try {
+    const tabs = await chrome.tabs.query({});
+    const pageDeps = {
+      config,
+      runtime,
+      now,
+      blockedPageUrl: chrome.runtime.getURL(PAGES.BLOCKED),
+      gatePageUrl: chrome.runtime.getURL(PAGES.GATE),
+    };
+    for (const action of planRestore(tabs, pageDeps)) {
+      await redirectTab(action);
+    }
+  } catch (error) {
+    console.error('Focus Guard: tab restore failed', error);
   }
 }
 
@@ -118,9 +144,7 @@ async function sync() {
       }
     }
     await ensureAlarms(config, runtime, now);
-    for (const change of changes) {
-      if (change.type === 'session-ended') await sweepGroupTabs(change.groupId, config, runtime);
-    }
+    await convergeTabs(config, runtime, now);
   } catch (error) {
     console.error('Focus Guard: sync failed', error);
   } finally {
@@ -274,7 +298,7 @@ async function handleMessage(msg) {
       return { ok: true, endsAt: session.endsAt };
     }
     case 'session:end': {
-      const { config, runtime } = await readState();
+      const { runtime } = await readState();
       const now = Date.now();
       const session = runtime.sessions ? runtime.sessions[msg.groupId] : null;
       if (!session) return { ok: false, error: 'No active session' };
@@ -287,7 +311,6 @@ async function handleMessage(msg) {
       nextRuntime.cooldowns[msg.groupId] = { startedAt: now, until: now + COOLDOWN_MS };
       await persistRuntime(nextRuntime);
       await sync();
-      await sweepGroupTabs(msg.groupId, config, nextRuntime);
       return { ok: true };
     }
     case 'overlay:check': {
