@@ -91,7 +91,13 @@ export function activeWindowEnds(date, schedule) {
   return ends;
 }
 
+export function isScheduleActive(date, schedule) {
+  if (schedule && schedule.alwaysActive) return true;
+  return isWithinSchedule(date, schedule);
+}
+
 export function scheduleBlockingEnd(date, schedule) {
+  if (schedule && schedule.alwaysActive) return null;
   if (!isWithinSchedule(date, schedule)) return null;
   let t = new Date(date.getTime());
   for (let i = 0; i < 500; i += 1) {
@@ -106,6 +112,7 @@ export function scheduleBlockingEnd(date, schedule) {
 }
 
 export function nextScheduleChange(date, schedule) {
+  if (schedule && schedule.alwaysActive) return null;
   const { windows } = normalizeWindows(schedule);
   if (windows.length === 0) return null;
   const candidates = [];
@@ -123,6 +130,17 @@ export function nextScheduleChange(date, schedule) {
   for (const c of candidates) {
     if (c.getTime() <= nowMs) continue;
     if (!best || c.getTime() < best.getTime()) best = c;
+  }
+  return best;
+}
+
+export function nextBlocksScheduleChange(date, blocks) {
+  let best = null;
+  for (const block of blocks || []) {
+    if (!block || !block.enabled) continue;
+    const next = nextScheduleChange(date, block.schedule);
+    if (!next) continue;
+    if (!best || next.getTime() < best.getTime()) best = next;
   }
   return best;
 }

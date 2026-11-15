@@ -2,12 +2,19 @@
   'use strict';
 
   var RUNTIME_KEY = 'focusRuntime';
+  var CONFIG_KEY = 'focusConfig';
+  var BLOCK_PREFIX = 'focusBlock:';
+  var BLOCK_STATE_PREFIX = 'focusBlockState:';
   var WARNING_WINDOW_MS = 60 * 1000;
 
   function formatDuration(ms) {
     var total = Math.max(0, Math.ceil(ms / 1000));
-    var m = Math.floor(total / 60);
+    var h = Math.floor(total / 3600);
+    var m = Math.floor((total % 3600) / 60);
     var s = total % 60;
+    if (h > 0) {
+      return h + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+    }
     return m + ':' + String(s).padStart(2, '0');
   }
 
@@ -30,25 +37,41 @@
     var listening = false;
 
     function start() {
-      chromeApi.storage.local.get([RUNTIME_KEY], function (store) {
-        var runtime = store && store[RUNTIME_KEY];
-        if (!runtime || !runtime.sessions) return;
-        if (Object.keys(runtime.sessions).length === 0) return;
-        if (!listening) {
-          listening = true;
-          try {
-            chromeApi.storage.onChanged.addListener(onStorageChange);
-          } catch {
-            /* storage events unavailable */
-          }
+      if (!listening) {
+        listening = true;
+        try {
+          chromeApi.storage.onChanged.addListener(onStorageChange);
+        } catch {
+          /* storage events unavailable */
         }
-        check();
-      });
+        try {
+          doc.addEventListener('visibilitychange', onVisibilityChange);
+        } catch {
+          /* visibility events unavailable */
+        }
+      }
+      check();
+    }
+
+    function onVisibilityChange() {
+      if (!doc.hidden) check();
     }
 
     function onStorageChange(changes, area) {
-      if (area !== 'local' || !changes[RUNTIME_KEY]) return;
-      check();
+      if (!changes) return;
+      var keys = Object.keys(changes);
+      if (area === 'local') {
+        if (keys.indexOf(RUNTIME_KEY) !== -1) check();
+        return;
+      }
+      if (area === 'sync') {
+        var relevant = keys.some(function (k) {
+          return k === CONFIG_KEY
+            || k.indexOf(BLOCK_PREFIX) === 0
+            || k.indexOf(BLOCK_STATE_PREFIX) === 0;
+        });
+        if (relevant) check();
+      }
     }
 
     function check() {
@@ -71,7 +94,7 @@
 
     function handleResponse(response) {
       stopTimers();
-      if (!response.active || !response.endsAt) {
+      if (!response || !response.active || !response.endsAt) {
         removeOverlay();
         return;
       }
@@ -113,15 +136,16 @@
         '@keyframes fgpulse{50%{border-color:#ff8f7a;}}',
         '.end{appearance:none;border:none;background:transparent;color:#9aa4bb;font-size:11px;text-decoration:underline;cursor:pointer;padding:0;align-self:flex-end;}',
         '.end:hover{color:#ffffff;}',
+        '.hidden{display:none;}',
         '</style>',
         '<div class="card">',
         '<span class="label">Free time</span>',
         '<div class="row"><span class="domain"></span><span class="time"></span></div>',
-        '<button class="end" type="button">End session now</button>',
+        '<button class="end" type="button">End snooze now</button>',
         '</div>',
       ].join('');
       doc.documentElement.appendChild(host);
-      shadow.querySelector('.end').addEventListener('click', endSession);
+      shadow.querySelector('.end').addEventListener('click', endSnooze);
     }
 
     function showOverlay() {
@@ -146,12 +170,21 @@
       if (!session || !host) return;
       var remaining = session.endsAt - now();
       if (remaining <= 0) {
+        if (session.mode === 'budget') {
+          // Re-verify with background in case tab was briefly inactive or budget synced.
+          check();
+          return;
+        }
         redirectToBlocked();
         return;
       }
       var shadow = host.shadowRoot;
+      var label = session.mode === 'budget' ? 'Time limit' : 'Snooze';
+      shadow.querySelector('.label').textContent = label;
       shadow.querySelector('.time').textContent = formatDuration(remaining);
-      shadow.querySelector('.domain').textContent = session.domain || '';
+      shadow.querySelector('.domain').textContent = session.blockName || session.domain || '';
+      var endBtn = shadow.querySelector('.end');
+      endBtn.classList.toggle('hidden', session.mode !== 'snooze');
       var card = shadow.querySelector('.card');
       card.classList.toggle('warn', remaining <= 10 * 1000);
     }
@@ -161,9 +194,9 @@
       navigate(blockedPageUrl() + '#' + encodeURIComponent(location.href));
     }
 
-    function endSession() {
-      if (!session || !session.groupId) return;
-      chromeApi.runtime.sendMessage({ type: 'session:end', groupId: session.groupId }, function () {
+    function endSnooze() {
+      if (!session || !session.blockId || session.mode !== 'snooze') return;
+      chromeApi.runtime.sendMessage({ type: 'snooze:end', blockId: session.blockId }, function () {
         if (chromeApi.runtime.lastError) return;
         redirectToBlocked();
       });
@@ -171,6 +204,11 @@
 
     function destroy() {
       stopTimers();
+      try {
+        doc.removeEventListener('visibilitychange', onVisibilityChange);
+      } catch {
+        /* ignore */
+      }
       removeOverlay();
     }
 

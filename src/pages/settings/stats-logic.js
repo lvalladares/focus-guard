@@ -11,11 +11,22 @@ export function formatHours(seconds) {
   return restMinutes > 0 ? `${hours}h ${restMinutes}m` : `${hours}h`;
 }
 
+function siteMatchesHost(site, hostname) {
+  if (!site) return false;
+  if (site.includeBaseHost && hostname === site.domain) return true;
+  if (site.includeAllSubdomains && hostname.endsWith(`.${site.domain}`)) return true;
+  if ((site.subdomains || []).includes(hostname)) return true;
+  return false;
+}
+
 export function isHostBlocked(hostname, config) {
+  for (const block of (config && config.blocks) || []) {
+    for (const site of block.sites || []) {
+      if (siteMatchesHost(site, hostname)) return true;
+    }
+  }
   for (const group of (config && config.groups) || []) {
-    if (group.includeBaseHost && hostname === group.domain) return true;
-    if (group.includeAllSubdomains && hostname.endsWith(`.${group.domain}`)) return true;
-    if ((group.subdomains || []).includes(hostname)) return true;
+    if (siteMatchesHost(group, hostname)) return true;
   }
   return false;
 }

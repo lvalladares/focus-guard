@@ -29,14 +29,26 @@ describe('formatHours', () => {
 });
 
 describe('isHostBlocked', () => {
-  it('matches base hosts, explicit subdomains and wildcards', () => {
+  it('matches base hosts, explicit subdomains and wildcards across groups and blocks', () => {
     expect(isHostBlocked('reddit.com', config)).toBe(true);
     expect(isHostBlocked('old.reddit.com', config)).toBe(true);
     expect(isHostBlocked('new.reddit.com', config)).toBe(false);
     expect(isHostBlocked('world.news.com', config)).toBe(true);
     expect(isHostBlocked('news.com', config)).toBe(false);
     expect(isHostBlocked('unrelated.com', config)).toBe(false);
-    expect(isHostBlocked('anything.com', { groups: [] })).toBe(false);
+    expect(isHostBlocked('anything.com', { blocks: [] })).toBe(false);
+
+    const blocksConfig = {
+      blocks: [
+        {
+          id: 'b1',
+          sites: [{ id: 's1', domain: 'youtube.com', includeBaseHost: true, includeAllSubdomains: true, subdomains: [] }],
+        },
+      ],
+    };
+    expect(isHostBlocked('youtube.com', blocksConfig)).toBe(true);
+    expect(isHostBlocked('m.youtube.com', blocksConfig)).toBe(true);
+    expect(isHostBlocked('vimeo.com', blocksConfig)).toBe(false);
   });
 });
 

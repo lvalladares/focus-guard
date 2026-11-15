@@ -13,12 +13,20 @@ createBlockedController({
     if (window.history.length > 1) window.history.back();
     else window.close();
   },
+  sendMessage: (msg) => new Promise((resolve) => {
+    chrome.runtime.sendMessage(msg, (response) => {
+      if (chrome.runtime.lastError) {
+        resolve({ ok: false, error: chrome.runtime.lastError.message });
+        return;
+      }
+      resolve(response);
+    });
+  }),
   settingsUrl: chrome.runtime.getURL(PAGES.SETTINGS),
-  gateUrlOf: (target) => `${chrome.runtime.getURL(PAGES.GATE)}#${encodeURIComponent(target)}`,
   wallpaperFor: wallpaperSrc,
   subscribe: (fn) => {
     chrome.storage.onChanged.addListener((changes, area) => {
-      if (area === 'local') fn();
+      if (area === 'local' || area === 'sync') fn();
     });
   },
 });

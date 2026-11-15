@@ -1,19 +1,40 @@
-import { normalizeConfig, defaultConfig } from '../lib/config.js';
+import {
+  normalizeConfig,
+  defaultConfig,
+  hasActivePersistentBlock,
+  validateLockedBlockChanges,
+} from '../lib/config.js';
 import { buildRules, diffRules } from '../lib/rules-builder.js';
-import { reconcile, startSession, isOverrideActive } from '../lib/sessions.js';
-import { evaluate } from '../lib/decision.js';
-import { isWithinSchedule, scheduleBlockingEnd, nextScheduleChange } from '../lib/schedule.js';
+import {
+  reconcile,
+  reconcileBlockStates,
+  activateBlockSnooze,
+  endBlockSnooze,
+  addBlockUsage,
+  deriveBlockRuntime,
+} from '../lib/sessions.js';
+import {
+  evaluate,
+  isAntiUninstallActive,
+  isExtensionsManagementUrl,
+} from '../lib/decision.js';
+import { isScheduleActive, scheduleBlockingEnd, nextBlocksScheduleChange } from '../lib/schedule.js';
 import { createConfigStorage } from '../lib/config-storage.js';
-import { groupMatchPatterns } from '../lib/patterns.js';
+import { blockMatchPatterns } from '../lib/patterns.js';
 import { planSweep, planRestore } from '../lib/tab-sweep.js';
 import { createSegmentTracker } from '../lib/stats-tracker.js';
 import { createStatsStorage } from '../lib/stats-storage.js';
-import { httpHostname } from '../lib/url.js';
-import { FREE_TIME_OPTIONS, COOLDOWN_MS, STORAGE_KEYS, PAGES, STATS } from '../lib/constants.js';
-import { safeParseUrl } from '../lib/url.js';
+import { httpHostname, safeParseUrl } from '../lib/url.js';
+import {
+  STORAGE_KEYS,
+  PAGES,
+  STATS,
+  USAGE_SYNC_INTERVAL_MS,
+} from '../lib/constants.js';
 
 const CONFIG_KEY = STORAGE_KEYS.CONFIG;
 const RUNTIME_KEY = STORAGE_KEYS.RUNTIME;
+const USAGE_SESSION_KEY = 'focusUsageActive';
 
 const configStorage = createConfigStorage({ sync: chrome.storage.sync, local: chrome.storage.local });
 
@@ -21,11 +42,17 @@ let syncing = false;
 let syncQueued = false;
 
 async function readState() {
-  const config = await configStorage.getConfig();
-  const store = await chrome.storage.local.get([RUNTIME_KEY]);
+  const rawConfig = await configStorage.getConfig();
+  const config = normalizeConfig(rawConfig).config;
+  const blockIds = config.blocks.map((b) => b.id);
+  const [blockStates, store] = await Promise.all([
+    configStorage.getBlockStates(blockIds),
+    chrome.storage.local.get([RUNTIME_KEY]),
+  ]);
   return {
-    config: normalizeConfig(config).config,
-    runtime: store[RUNTIME_KEY] || { sessions: {}, cooldowns: {}, override: null },
+    config,
+    blockStates,
+    runtime: store[RUNTIME_KEY] || { override: null },
   };
 }
 
@@ -54,12 +81,8 @@ function blockedUrlFor(url) {
   return `${chrome.runtime.getURL(PAGES.BLOCKED)}#${encodeURIComponent(url)}`;
 }
 
-function gateUrlFor(url) {
-  return `${chrome.runtime.getURL(PAGES.GATE)}#${encodeURIComponent(url)}`;
-}
-
-function redirectFor(url, verdict) {
-  return verdict === 'gate' ? gateUrlFor(url) : blockedUrlFor(url);
+function redirectFor(url) {
+  return blockedUrlFor(url);
 }
 
 async function redirectTab(action) {
@@ -70,17 +93,22 @@ async function redirectTab(action) {
   }
 }
 
+async function enforceAntiUninstallOnTab(tabId, url, config, now) {
+  if (!url || !isAntiUninstallActive(config, now)) return false;
+  if (!isExtensionsManagementUrl(url)) return false;
+  await redirectTab({ tabId, url: blockedUrlFor(url) });
+  return true;
+}
+
 // Keeps open tabs in sync with the current blocking state, both ways:
-// - tabs sitting on blocked sites are pulled to the block/gate pages (so turning blocking
-//   on also blocks tabs that were already open), and
-// - tabs parked on those pages are sent back to their original URL once it is allowed
-//   again (blocking turned off, a dose running, a path whitelisted, a group removed).
-async function convergeTabs(config, runtime, now) {
-  const patterns = [...new Set((config.groups || []).flatMap(groupMatchPatterns))];
+// - tabs sitting on blocked sites (or chrome://extensions under anti-uninstall) are pulled to blocked.html
+// - tabs parked on blocked.html are sent back to their original URL once allowed again
+async function convergeTabs(config, runtime, blockStates, now) {
+  const patterns = [...new Set((config.blocks || []).flatMap(blockMatchPatterns))];
   if (patterns.length > 0) {
     try {
       const tabs = await chrome.tabs.query({ url: patterns });
-      for (const action of planSweep(tabs, { config, runtime, now, redirectFor })) {
+      for (const action of planSweep(tabs, { config, runtime, blockStates, now, redirectFor })) {
         await redirectTab(action);
       }
     } catch (error) {
@@ -89,9 +117,18 @@ async function convergeTabs(config, runtime, now) {
   }
   try {
     const tabs = await chrome.tabs.query({});
+    if (isAntiUninstallActive(config, now)) {
+      for (const action of planSweep(
+        tabs.filter((t) => isExtensionsManagementUrl(t.url)),
+        { config, runtime, blockStates, now, redirectFor },
+      )) {
+        await redirectTab(action);
+      }
+    }
     const pageDeps = {
       config,
       runtime,
+      blockStates,
       now,
       blockedPageUrl: chrome.runtime.getURL(PAGES.BLOCKED),
       gatePageUrl: chrome.runtime.getURL(PAGES.GATE),
@@ -104,20 +141,172 @@ async function convergeTabs(config, runtime, now) {
   }
 }
 
-async function ensureAlarms(config, runtime, now) {
-  for (const [groupId, session] of Object.entries(runtime.sessions || {})) {
-    if (session.endsAt > now) chrome.alarms.create(`session-end:${groupId}`, { when: session.endsAt });
-  }
-  for (const [groupId, cooldown] of Object.entries(runtime.cooldowns || {})) {
-    if (cooldown.until > now) chrome.alarms.create(`cooldown-end:${groupId}`, { when: cooldown.until });
+async function ensureAlarms(config, runtime, blockStates, now) {
+  for (const block of config.blocks || []) {
+    const state = blockStates[block.id];
+    if (!state) continue;
+    if (state.snooze && state.snooze.endsAt > now) {
+      chrome.alarms.create(`snooze-end:${block.id}`, { when: state.snooze.endsAt });
+    }
+    const rt = deriveBlockRuntime(block, state, now);
+    if (rt.budgetResetAt && rt.budgetResetAt > now) {
+      chrome.alarms.create(`budget-reset:${block.id}`, { when: rt.budgetResetAt });
+    }
+    if (rt.nextSnoozeAt && rt.nextSnoozeAt > now) {
+      chrome.alarms.create(`snooze-unlock:${block.id}`, { when: rt.nextSnoozeAt });
+    }
   }
   if (runtime.override && runtime.override.until > now) {
     chrome.alarms.create('override-end', { when: runtime.override.until });
   }
-  const next = nextScheduleChange(new Date(now), config.schedule);
+  const next = nextBlocksScheduleChange(new Date(now), config.blocks);
   if (next) chrome.alarms.create('schedule-boundary', { when: next.getTime() });
   const tick = await chrome.alarms.get('tick');
   if (!tick) chrome.alarms.create('tick', { periodInMinutes: 1 });
+}
+
+// --- Active tab global-time-limit usage tracking ---
+
+let activeUsage = null;
+let usageReadyPromise = null;
+let usageQueue = Promise.resolve();
+
+function serializeUsage(task) {
+  const run = usageQueue.then(task, task);
+  usageQueue = run.catch(() => {});
+  return run;
+}
+
+async function loadActiveUsage() {
+  try {
+    const session = await chrome.storage.session.get(USAGE_SESSION_KEY);
+    const saved = session[USAGE_SESSION_KEY];
+    if (saved && typeof saved.url === 'string' && typeof saved.startedAt === 'number') {
+      activeUsage = saved;
+    }
+  } catch {
+    /* session storage unavailable */
+  }
+}
+
+function ensureUsageReady() {
+  if (!usageReadyPromise) {
+    usageReadyPromise = loadActiveUsage().catch(() => {
+      usageReadyPromise = null;
+    });
+  }
+  return usageReadyPromise;
+}
+
+async function saveActiveUsage() {
+  try {
+    if (activeUsage) await chrome.storage.session.set({ [USAGE_SESSION_KEY]: activeUsage });
+    else await chrome.storage.session.remove(USAGE_SESSION_KEY);
+  } catch {
+    /* session storage unavailable */
+  }
+}
+
+function scheduleBudgetAlarmsForUrl(url, config, runtime, blockStates, now) {
+  if (!url) return;
+  const result = evaluate({ url, now, config, runtime, blockStates });
+  if (result.verdict === 'allow' && result.budgetBlocks && result.budgetBlocks.length > 0) {
+    let minRemaining = Infinity;
+    for (const block of result.budgetBlocks) {
+      const rt = deriveBlockRuntime(block, blockStates[block.id], now);
+      if (rt.state === 'budget' && rt.budgetRemainingMs > 0) {
+        minRemaining = Math.min(minRemaining, rt.budgetRemainingMs);
+        chrome.alarms.create(`budget-end:${block.id}`, { when: now + rt.budgetRemainingMs });
+      }
+    }
+    if (Number.isFinite(minRemaining) && minRemaining > 0) {
+      chrome.alarms.create('usage-checkpoint', { when: now + Math.min(USAGE_SYNC_INTERVAL_MS, minRemaining) });
+    }
+  }
+}
+
+async function flushBudgetUsage(now = Date.now()) {
+  await ensureUsageReady();
+  if (!activeUsage || !activeUsage.url) return false;
+  const elapsed = Math.max(0, now - activeUsage.startedAt);
+  const trackedUrl = activeUsage.url;
+  const startedAt = activeUsage.startedAt;
+  activeUsage.startedAt = now;
+  await saveActiveUsage();
+
+  if (elapsed < 500) return false;
+
+  const { config, runtime, blockStates } = await readState();
+  const result = evaluate({ url: trackedUrl, now: startedAt, config, runtime, blockStates });
+  if (result.verdict !== 'allow' || !result.budgetBlocks || result.budgetBlocks.length === 0) {
+    return false;
+  }
+
+  let exhausted = false;
+  for (const block of result.budgetBlocks) {
+    const updated = await configStorage.updateBlockState(block.id, (current) => (
+      addBlockUsage(block, current, elapsed, now)
+    ));
+    const rt = deriveBlockRuntime(block, updated, now);
+    if (rt.state !== 'budget') exhausted = true;
+  }
+  return exhausted;
+}
+
+async function focusTabForUsage({ url, tabId, windowId, now = Date.now() }) {
+  return serializeUsage(async () => {
+    const exhausted = await flushBudgetUsage(now);
+    const parsed = safeParseUrl(url);
+    if (parsed && (parsed.protocol === 'http:' || parsed.protocol === 'https:')) {
+      activeUsage = { url, tabId, windowId, startedAt: now };
+    } else {
+      activeUsage = null;
+    }
+    await saveActiveUsage();
+    const { config, runtime, blockStates } = await readState();
+    if (activeUsage) {
+      scheduleBudgetAlarmsForUrl(activeUsage.url, config, runtime, blockStates, now);
+    }
+    if (exhausted) await sync();
+  });
+}
+
+async function blurUsage(now = Date.now()) {
+  return serializeUsage(async () => {
+    const exhausted = await flushBudgetUsage(now);
+    activeUsage = null;
+    await saveActiveUsage();
+    if (exhausted) await sync();
+  });
+}
+
+async function checkpointUsage(now = Date.now()) {
+  return serializeUsage(async () => {
+    await ensureUsageReady();
+    if (!activeUsage) return;
+    let tab = null;
+    try {
+      [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    } catch {
+      tab = null;
+    }
+    if (!tab || tab.id !== activeUsage.tabId || !tab.url || tab.url !== activeUsage.url) {
+      const exhausted = await flushBudgetUsage(now);
+      const parsed = tab && safeParseUrl(tab.url);
+      if (parsed && (parsed.protocol === 'http:' || parsed.protocol === 'https:')) {
+        activeUsage = { url: tab.url, tabId: tab.id, windowId: tab.windowId, startedAt: now };
+      } else {
+        activeUsage = null;
+      }
+      await saveActiveUsage();
+      if (exhausted) await sync();
+      return;
+    }
+    const exhausted = await flushBudgetUsage(now);
+    const { config, runtime, blockStates } = await readState();
+    scheduleBudgetAlarmsForUrl(activeUsage.url, config, runtime, blockStates, now);
+    if (exhausted) await sync();
+  });
 }
 
 async function sync() {
@@ -127,13 +316,19 @@ async function sync() {
   }
   syncing = true;
   try {
-    const { config, runtime: raw } = await readState();
+    const { config, blockStates: rawBlockStates, runtime: rawRuntime } = await readState();
     const now = Date.now();
-    const { runtime, changes } = reconcile(raw, now);
-    if (changes.length > 0 || JSON.stringify(runtime) !== JSON.stringify(raw)) {
+    const { runtime, changes: rtChanges } = reconcile(rawRuntime, now);
+    if (rtChanges.length > 0 || JSON.stringify(runtime) !== JSON.stringify(rawRuntime)) {
       await persistRuntime(runtime);
     }
-    const desired = buildRules({ config, runtime, now, extensionId: chrome.runtime.id });
+
+    const { blockStates, changed: statesChanged } = reconcileBlockStates(config, rawBlockStates, now);
+    if (statesChanged) {
+      await configStorage.setBlockStates(blockStates);
+    }
+
+    const desired = buildRules({ config, runtime, blockStates, now, extensionId: chrome.runtime.id });
     const current = (await chrome.declarativeNetRequest.getDynamicRules()).map(sanitizeRule);
     const { removeRuleIds, addRules } = diffRules(current, desired);
     if (removeRuleIds.length > 0 || addRules.length > 0) {
@@ -143,8 +338,8 @@ async function sync() {
         console.error('Focus Guard: updating dynamic rules failed', error, { removeRuleIds, addRules });
       }
     }
-    await ensureAlarms(config, runtime, now);
-    await convergeTabs(config, runtime, now);
+    await ensureAlarms(config, runtime, blockStates, now);
+    await convergeTabs(config, runtime, blockStates, now);
   } catch (error) {
     console.error('Focus Guard: sync failed', error);
   } finally {
@@ -166,6 +361,8 @@ async function openSettings() {
     await chrome.tabs.create({ url });
   }
 }
+
+// --- Stats tracking ---
 
 const statsStorage = createStatsStorage({ storage: chrome.storage.local });
 const segmentTracker = createSegmentTracker();
@@ -216,18 +413,27 @@ async function persistOpenSegment() {
   }
 }
 
-async function statsFocusTab(tabId, windowId) {
+async function handleFocusTab(tabId, windowId) {
+  const now = Date.now();
+  let tab = null;
+  try {
+    tab = await chrome.tabs.get(tabId);
+  } catch {
+    tab = null;
+  }
+  const url = tab ? tab.url : null;
+  const { config } = await readState();
+  if (tab && await enforceAntiUninstallOnTab(tabId, url, config, now)) {
+    return;
+  }
+
+  await focusTabForUsage({ url, tabId, windowId, now });
+
   await ensureStatsReady();
   if (!statsEnabled) return;
-  let hostname = null;
-  try {
-    const tab = await chrome.tabs.get(tabId);
-    hostname = httpHostname(tab.url);
-  } catch {
-    hostname = null;
-  }
   focusedWindowId = windowId;
-  const emissions = segmentTracker.handleFocus({ hostname, tabId, windowId, time: Date.now() });
+  const hostname = httpHostname(url);
+  const emissions = segmentTracker.handleFocus({ hostname, tabId, windowId, time: now });
   await persistOpenSegment();
   await statsFlush(emissions);
 }
@@ -263,78 +469,125 @@ async function disableStatsTracking() {
   await statsFlush(emissions);
 }
 
+function getNonPersistentScheduleEnd(config, now) {
+  let maxEnd = null;
+  for (const block of config.blocks || []) {
+    if (!block.enabled || block.persistent) continue;
+    if (!isScheduleActive(new Date(now), block.schedule)) continue;
+    const end = scheduleBlockingEnd(new Date(now), block.schedule);
+    const ts = end ? end.getTime() : now + 60 * 60 * 1000;
+    if (!maxEnd || ts > maxEnd) maxEnd = ts;
+  }
+  return maxEnd;
+}
+
+function hasActiveNonPersistentScheduledBlock(config, now) {
+  return (config.blocks || []).some(
+    (b) => b.enabled && !b.persistent && isScheduleActive(new Date(now), b.schedule),
+  );
+}
+
 async function handleMessage(msg) {
   switch (msg && msg.type) {
     case 'state:get': {
-      const { config, runtime } = await readState();
-      return { ok: true, config, runtime, now: Date.now() };
+      await serializeUsage(() => flushBudgetUsage(Date.now()));
+      const { config, blockStates, runtime } = await readState();
+      return { ok: true, config, blockStates, runtime, now: Date.now() };
     }
     case 'config:save': {
+      const { config: currentConfig } = await readState();
       const { config, errors } = normalizeConfig(msg.config);
       if (errors.length > 0) return { ok: false, errors };
+      const now = Date.now();
+      const lockCheck = validateLockedBlockChanges(currentConfig, config, now);
+      if (!lockCheck.ok) return { ok: false, errors: lockCheck.errors };
       await configStorage.setConfig(config);
       await sync();
       return { ok: true, config };
     }
-    case 'session:start': {
-      const { config, runtime } = await readState();
+    case 'snooze:start': {
       const now = Date.now();
-      const group = config.groups.find((g) => g.id === msg.groupId);
-      if (!group || group.level !== 'partial') return { ok: false, error: 'Group is not partially blocked' };
-      if (!FREE_TIME_OPTIONS.includes(msg.minutes)) return { ok: false, error: 'Invalid duration' };
+      const { config, runtime, blockStates } = await readState();
       const target = safeParseUrl(msg.targetUrl);
       if (!target) return { ok: false, error: 'Invalid target URL' };
-      const result = evaluate({ url: msg.targetUrl, now, config, runtime });
-      if (result.verdict !== 'gate') return { ok: false, verdict: result.verdict };
-      const session = startSession({ groupId: group.id, minutes: msg.minutes, now });
-      const nextRuntime = {
-        ...runtime,
-        sessions: { ...runtime.sessions, [group.id]: session },
-        cooldowns: { ...runtime.cooldowns },
-      };
-      delete nextRuntime.cooldowns[group.id];
-      await persistRuntime(nextRuntime);
+
+      const result = evaluate({ url: msg.targetUrl, now, config, runtime, blockStates });
+      if (result.verdict === 'allow') return { ok: true, verdict: 'allow' };
+      if (result.verdict !== 'block-snoozable') {
+        return { ok: false, verdict: result.verdict, error: 'Snooze is not available' };
+      }
+
+      const requestedIds = Array.isArray(msg.blockIds) && msg.blockIds.length > 0
+        ? msg.blockIds
+        : result.snoozableBlocks.map((b) => b.block.id);
+
+      let latestEndsAt = 0;
+      for (const blockId of requestedIds) {
+        const block = config.blocks.find((b) => b.id === blockId);
+        if (!block) return { ok: false, error: 'Block not found' };
+        let activationError = null;
+        const nextState = await configStorage.updateBlockState(blockId, (current) => {
+          const res = activateBlockSnooze(block, current, now);
+          if (!res.ok) {
+            activationError = res.error;
+            return current;
+          }
+          latestEndsAt = Math.max(latestEndsAt, res.snooze.endsAt);
+          return res.state;
+        });
+        if (activationError) return { ok: false, error: activationError };
+        if (nextState.snooze) latestEndsAt = Math.max(latestEndsAt, nextState.snooze.endsAt);
+      }
+
       await sync();
-      return { ok: true, endsAt: session.endsAt };
+      return { ok: true, endsAt: latestEndsAt };
     }
-    case 'session:end': {
-      const { runtime } = await readState();
+    case 'snooze:end': {
       const now = Date.now();
-      const session = runtime.sessions ? runtime.sessions[msg.groupId] : null;
-      if (!session) return { ok: false, error: 'No active session' };
-      const nextRuntime = {
-        sessions: { ...runtime.sessions },
-        cooldowns: { ...runtime.cooldowns },
-        override: runtime.override,
-      };
-      delete nextRuntime.sessions[msg.groupId];
-      nextRuntime.cooldowns[msg.groupId] = { startedAt: now, until: now + COOLDOWN_MS };
-      await persistRuntime(nextRuntime);
+      if (!msg.blockId) return { ok: false, error: 'Missing blockId' };
+      await configStorage.updateBlockState(msg.blockId, (current) => endBlockSnooze(current, now));
       await sync();
       return { ok: true };
     }
     case 'overlay:check': {
-      const { config, runtime } = await readState();
-      const result = evaluate({ url: msg.url, now: Date.now(), config, runtime });
-      const active = result.verdict === 'allow' && result.session;
+      await ensureUsageReady();
+      const now = Date.now();
+      const { config, runtime, blockStates } = await readState();
+      // Account for unflushed live active-tab budget usage so countdown is accurate to the second
+      const adjustedStates = { ...blockStates };
+      if (activeUsage && activeUsage.url && activeUsage.startedAt < now) {
+        const elapsed = now - activeUsage.startedAt;
+        const pre = evaluate({ url: activeUsage.url, now: activeUsage.startedAt, config, runtime, blockStates });
+        if (pre.verdict === 'allow' && pre.budgetBlocks) {
+          for (const b of pre.budgetBlocks) {
+            adjustedStates[b.id] = addBlockUsage(b, adjustedStates[b.id], elapsed, now);
+          }
+        }
+      }
+      const result = evaluate({ url: msg.url, now, config, runtime, blockStates: adjustedStates });
+      const active = result.verdict === 'allow' && Boolean(result.activeTimer);
       return {
         ok: true,
-        active: Boolean(active),
-        groupId: result.group ? result.group.id : null,
-        domain: result.group ? result.group.domain : null,
-        remainingMs: active ? result.sessionRemainingMs : null,
-        endsAt: active ? result.session.endsAt : null,
+        active,
+        mode: active ? result.activeTimer.mode : null,
+        blockId: active ? result.activeTimer.blockId : null,
+        blockName: active ? result.activeTimer.blockName : null,
+        remainingMs: active ? result.activeTimer.remainingMs : null,
+        endsAt: active ? result.activeTimer.endsAt : null,
         verdict: result.verdict,
       };
     }
     case 'master:set': {
       const { config, runtime } = await readState();
       const now = Date.now();
-      const inSchedule = isWithinSchedule(new Date(now), config.schedule);
-      if (!msg.enabled && inSchedule && !isOverrideActive(runtime, now)) {
+      const hasNonPersistentScheduled = hasActiveNonPersistentScheduledBlock(config, now);
+      if (!msg.enabled && hasNonPersistentScheduled && !(runtime.override && runtime.override.until > now)) {
         return { ok: false, error: 'confirmation-required' };
       }
-      if (msg.enabled && inSchedule && isOverrideActive(runtime, now)) {
+      if (!msg.enabled && !hasNonPersistentScheduled && hasActivePersistentBlock(config, now) && !config.master.enabled) {
+        return { ok: false, error: 'persistent-locked' };
+      }
+      if (msg.enabled && hasNonPersistentScheduled && runtime.override && runtime.override.until > now) {
         const nextRuntime = { ...runtime, override: null };
         await persistRuntime(nextRuntime);
         await sync();
@@ -348,11 +601,10 @@ async function handleMessage(msg) {
     case 'override:off': {
       const { config, runtime } = await readState();
       const now = Date.now();
-      if (!isWithinSchedule(new Date(now), config.schedule)) {
-        return { ok: false, error: 'Not inside the schedule' };
+      if (!hasActiveNonPersistentScheduledBlock(config, now)) {
+        return { ok: false, error: 'No non-persistent scheduled blocks active' };
       }
-      const end = scheduleBlockingEnd(new Date(now), config.schedule);
-      const until = end ? end.getTime() : now + 60 * 60 * 1000;
+      const until = getNonPersistentScheduleEnd(config, now) || (now + 60 * 60 * 1000);
       const nextRuntime = { ...runtime, override: { until } };
       await persistRuntime(nextRuntime);
       await sync();
@@ -385,31 +637,55 @@ chrome.runtime.onStartup.addListener(() => {
   sync();
 });
 
-chrome.alarms.onAlarm.addListener(() => {
-  statsTick();
-  sync();
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  const name = alarm ? alarm.name : '';
+  if (name === 'usage-checkpoint' || name.startsWith('budget-end:')) {
+    await checkpointUsage();
+  } else {
+    await serializeUsage(() => flushBudgetUsage(Date.now()));
+  }
+  await statsTick();
+  await sync();
 });
 
 chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
-  statsFocusTab(tabId, windowId);
+  handleFocusTab(tabId, windowId);
+});
+
+chrome.tabs.onCreated.addListener(async (tab) => {
+  const url = tab.pendingUrl || tab.url;
+  if (!url || !tab.id) return;
+  const { config } = await readState();
+  await enforceAntiUninstallOnTab(tab.id, url, config, Date.now());
 });
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  const url = changeInfo.url || (tab && tab.url);
+  if (changeInfo.url) {
+    const { config } = await readState();
+    if (await enforceAntiUninstallOnTab(tabId, changeInfo.url, config, Date.now())) {
+      return;
+    }
+  }
   if (!changeInfo.url) return;
+  if (tab && tab.active && tab.windowId === focusedWindowId) {
+    await focusTabForUsage({ url: changeInfo.url, tabId, windowId: tab.windowId, now: Date.now() });
+  }
   await ensureStatsReady();
   if (!statsEnabled) return;
   if (!tab || !tab.active || tab.windowId !== focusedWindowId) return;
-  const emissions = segmentTracker.handleFocus({ hostname: httpHostname(changeInfo.url), tabId, windowId: tab.windowId, time: Date.now() });
+  const emissions = segmentTracker.handleFocus({ hostname: httpHostname(url), tabId, windowId: tab.windowId, time: Date.now() });
   await persistOpenSegment();
   await statsFlush(emissions);
 });
 
 chrome.windows.onFocusChanged.addListener(async (windowId) => {
-  await ensureStatsReady();
-  focusedWindowId = windowId;
-  if (!statsEnabled) return;
   const time = Date.now();
   if (windowId === chrome.windows.WINDOW_ID_NONE) {
+    await blurUsage(time);
+    await ensureStatsReady();
+    focusedWindowId = windowId;
+    if (!statsEnabled) return;
     const emissions = segmentTracker.handleBlur(time);
     await persistOpenSegment();
     await statsFlush(emissions);
@@ -421,6 +697,17 @@ chrome.windows.onFocusChanged.addListener(async (windowId) => {
   } catch {
     tab = null;
   }
+  if (tab) {
+    const { config } = await readState();
+    if (await enforceAntiUninstallOnTab(tab.id, tab.url, config, time)) {
+      return;
+    }
+  }
+  await focusTabForUsage({ url: tab ? tab.url : null, tabId: tab ? tab.id : null, windowId, now: time });
+
+  await ensureStatsReady();
+  focusedWindowId = windowId;
+  if (!statsEnabled) return;
   const hostname = tab ? httpHostname(tab.url) : null;
   const emissions = segmentTracker.handleFocus({ hostname, tabId: tab ? tab.id : null, windowId, time });
   await persistOpenSegment();
@@ -428,6 +715,15 @@ chrome.windows.onFocusChanged.addListener(async (windowId) => {
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
+  await serializeUsage(async () => {
+    await ensureUsageReady();
+    if (activeUsage && activeUsage.tabId === tabId) {
+      const exhausted = await flushBudgetUsage(Date.now());
+      activeUsage = null;
+      await saveActiveUsage();
+      if (exhausted) await sync();
+    }
+  });
   await ensureStatsReady();
   if (!statsEnabled) return;
   const emissions = segmentTracker.handleTabRemoved(tabId, Date.now());
@@ -437,7 +733,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 });
 
 async function onConfigChanged(nextConfig) {
-  if (statsReadyPromise) {
+  if (statsReadyPromise && nextConfig) {
     const { config } = normalizeConfig(nextConfig);
     const enabled = Boolean(config.stats && config.stats.enabled);
     if (enabled !== statsEnabled) {
@@ -449,8 +745,21 @@ async function onConfigChanged(nextConfig) {
 }
 
 chrome.storage.onChanged.addListener(async (changes, area) => {
-  if (area === 'sync' && changes[CONFIG_KEY]) {
-    await onConfigChanged(changes[CONFIG_KEY].newValue);
+  if (area === 'sync') {
+    const keys = Object.keys(changes);
+    const relevant = keys.some(
+      (k) => k === CONFIG_KEY
+        || k.startsWith(STORAGE_KEYS.BLOCK_PREFIX)
+        || k.startsWith(STORAGE_KEYS.BLOCK_STATE_PREFIX),
+    );
+    if (relevant) {
+      if (changes[CONFIG_KEY]) {
+        const { config } = await readState();
+        await onConfigChanged(config);
+      } else {
+        sync();
+      }
+    }
     return;
   }
   if (area === 'local' && changes[CONFIG_KEY]) {

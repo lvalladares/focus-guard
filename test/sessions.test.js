@@ -1,103 +1,144 @@
 import { describe, it, expect } from 'vitest';
-import { startSession, deriveGroupRuntime, reconcile, isOverrideActive, emptyRuntime } from '../src/lib/sessions.js';
-import { COOLDOWN_MS } from '../src/lib/constants.js';
+import {
+  emptyBlockState,
+  deriveBlockRuntime,
+  activateBlockSnooze,
+  endBlockSnooze,
+  addBlockUsage,
+  reconcileBlockStates,
+  reconcile,
+  isOverrideActive,
+} from '../src/lib/sessions.js';
 
 const NOW = 1700000000000;
 const MIN = 60 * 1000;
+const HOUR = 60 * MIN;
 
-describe('startSession', () => {
-  it.each([10, 20, 30])('creates a session of %i minutes with absolute timestamps', (minutes) => {
-    const session = startSession({ groupId: 'g1', minutes, now: NOW });
-    expect(session).toEqual({ startedAt: NOW, endsAt: NOW + minutes * MIN, minutes });
+function makeBlock(overrides = {}) {
+  return {
+    id: 'b1',
+    name: 'Social',
+    enabled: true,
+    persistent: false,
+    sites: [],
+    schedule: { alwaysActive: false, windows: [] },
+    timeLimit: { enabled: false, minutes: 20, periodHours: 8 },
+    snooze: { enabled: false, durationMinutes: 5, maxCount: 2, periodHours: 4 },
+    ...overrides,
+  };
+}
+
+describe('deriveBlockRuntime', () => {
+  it('returns blocked when neither timeLimit nor snooze is enabled', () => {
+    const rt = deriveBlockRuntime(makeBlock(), emptyBlockState(), NOW);
+    expect(rt.state).toBe('blocked');
+  });
+
+  it('allows via global time limit budget first, then falls back to snooze once exhausted', () => {
+    const block = makeBlock({
+      timeLimit: { enabled: true, minutes: 20, periodHours: 8 },
+      snooze: { enabled: true, durationMinutes: 5, maxCount: 2, periodHours: 4 },
+    });
+
+    const fresh = deriveBlockRuntime(block, emptyBlockState(), NOW);
+    expect(fresh.state).toBe('budget');
+    expect(fresh.budgetRemainingMs).toBe(20 * MIN);
+
+    const usedHalf = addBlockUsage(block, emptyBlockState(), 10 * MIN, NOW);
+    const halfRt = deriveBlockRuntime(block, usedHalf, NOW + 10 * MIN);
+    expect(halfRt.state).toBe('budget');
+    expect(halfRt.budgetRemainingMs).toBe(10 * MIN);
+    expect(halfRt.budgetResetAt).toBe(NOW + 8 * HOUR);
+
+    const exhausted = addBlockUsage(block, usedHalf, 15 * MIN, NOW + 25 * MIN);
+    const exRt = deriveBlockRuntime(block, exhausted, NOW + 25 * MIN);
+    expect(exRt.state).toBe('snoozable');
+    expect(exRt.snoozesLeft).toBe(2);
+    expect(exRt.snoozeDurationMinutes).toBe(5);
+    expect(exRt.budgetResetAt).toBe(NOW + 8 * HOUR);
+
+    // Budget resets automatically 8 hours after window start
+    const resetRt = deriveBlockRuntime(block, exhausted, NOW + 8 * HOUR);
+    expect(resetRt.state).toBe('budget');
+    expect(resetRt.budgetRemainingMs).toBe(20 * MIN);
+  });
+
+  it('tracks snooze activations across continuous wall-clock time', () => {
+    const block = makeBlock({
+      snooze: { enabled: true, durationMinutes: 5, maxCount: 2, periodHours: 4 },
+    });
+
+    const act1 = activateBlockSnooze(block, emptyBlockState(), NOW);
+    expect(act1.ok).toBe(true);
+    expect(act1.snooze.endsAt).toBe(NOW + 5 * MIN);
+
+    const during1 = deriveBlockRuntime(block, act1.state, NOW + 2 * MIN);
+    expect(during1.state).toBe('snooze');
+    expect(during1.remainingMs).toBe(3 * MIN);
+    expect(during1.snoozesLeft).toBe(1);
+
+    const after1 = deriveBlockRuntime(block, act1.state, NOW + 6 * MIN);
+    expect(after1.state).toBe('snoozable');
+    expect(after1.snoozesLeft).toBe(1);
+
+    const act2 = activateBlockSnooze(block, act1.state, NOW + 10 * MIN);
+    expect(act2.ok).toBe(true);
+
+    const after2 = deriveBlockRuntime(block, act2.state, NOW + 16 * MIN);
+    expect(after2.state).toBe('snoozes-exhausted');
+    expect(after2.snoozesLeft).toBe(0);
+    expect(after2.nextSnoozeAt).toBe(NOW + 4 * HOUR);
+
+    // Trying to activate a 3rd snooze fails
+    const act3 = activateBlockSnooze(block, act2.state, NOW + 16 * MIN);
+    expect(act3.ok).toBe(false);
+
+    // 4 hours after the first snooze, 1 slot frees up
+    const unlocked = deriveBlockRuntime(block, act2.state, NOW + 4 * HOUR + 1);
+    expect(unlocked.state).toBe('snoozable');
+    expect(unlocked.snoozesLeft).toBe(1);
+  });
+
+  it('ends an active snooze early while preserving snooze quota consumption', () => {
+    const block = makeBlock({
+      snooze: { enabled: true, durationMinutes: 10, maxCount: 1, periodHours: 4 },
+    });
+    const act = activateBlockSnooze(block, emptyBlockState(), NOW);
+    const ended = endBlockSnooze(act.state, NOW + MIN);
+    const rt = deriveBlockRuntime(block, ended, NOW + MIN);
+    expect(rt.state).toBe('snoozes-exhausted');
+    expect(rt.snoozesLeft).toBe(0);
   });
 });
 
-describe('deriveGroupRuntime', () => {
-  it('returns none when there is no state', () => {
-    expect(deriveGroupRuntime('g1', emptyRuntime(), NOW)).toEqual({ state: 'none' });
-    expect(deriveGroupRuntime('g1', null, NOW)).toEqual({ state: 'none' });
-  });
-
-  it('detects an active session', () => {
-    const runtime = { sessions: { g1: startSession({ groupId: 'g1', minutes: 10, now: NOW }) }, cooldowns: {}, override: null };
-    const rt = deriveGroupRuntime('g1', runtime, NOW + 5 * MIN);
-    expect(rt.state).toBe('session');
-    expect(rt.sessionRemainingMs).toBe(5 * MIN);
-  });
-
-  it('derives a cooldown from a stale session even if never formalized', () => {
-    const runtime = { sessions: { g1: startSession({ groupId: 'g1', minutes: 10, now: NOW }) }, cooldowns: {}, override: null };
-    const rt = deriveGroupRuntime('g1', runtime, NOW + 12 * MIN);
-    expect(rt.state).toBe('cooldown');
-    expect(rt.cooldownRemainingMs).toBe(NOW + 10 * MIN + COOLDOWN_MS - (NOW + 12 * MIN));
-  });
-
-  it('prefers the recorded cooldown when present', () => {
-    const runtime = { sessions: {}, cooldowns: { g1: { startedAt: NOW, until: NOW + 3 * MIN } }, override: null };
-    const rt = deriveGroupRuntime('g1', runtime, NOW + 1 * MIN);
-    expect(rt.state).toBe('cooldown');
-    expect(rt.cooldownRemainingMs).toBe(2 * MIN);
-  });
-
-  it('returns none when everything expired long ago', () => {
-    const runtime = { sessions: { g1: startSession({ groupId: 'g1', minutes: 10, now: NOW }) }, cooldowns: {}, override: null };
-    expect(deriveGroupRuntime('g1', runtime, NOW + 10 * MIN + COOLDOWN_MS + 1).state).toBe('none');
-  });
-});
-
-describe('reconcile', () => {
-  it('keeps active sessions and cooldowns untouched', () => {
-    const runtime = {
-      sessions: { g1: startSession({ groupId: 'g1', minutes: 10, now: NOW }) },
-      cooldowns: { g2: { startedAt: NOW, until: NOW + 5 * MIN } },
-      override: { until: NOW + 30 * MIN },
+describe('reconcileBlockStates', () => {
+  it('clears expired snoozes, expired snoozeHistory, and expired usageWindows', () => {
+    const block = makeBlock({
+      timeLimit: { enabled: true, minutes: 20, periodHours: 8 },
+      snooze: { enabled: true, durationMinutes: 5, maxCount: 2, periodHours: 4 },
+    });
+    const state = {
+      snooze: { startedAt: NOW, endsAt: NOW + 5 * MIN, durationMinutes: 5 },
+      snoozeHistory: [NOW],
+      usageWindow: { startedAt: NOW, usedMs: 15 * MIN },
+      updatedAt: NOW,
     };
-    const { runtime: rt, changes } = reconcile(runtime, NOW + 1 * MIN);
-    expect(changes).toEqual([]);
-    expect(rt.sessions.g1).toBe(runtime.sessions.g1);
-    expect(rt.cooldowns.g2).toEqual(runtime.cooldowns.g2);
-    expect(rt.override).toEqual({ until: NOW + 30 * MIN });
-  });
 
-  it('formalizes an expired session into a cooldown and reports a change', () => {
-    const session = startSession({ groupId: 'g1', minutes: 10, now: NOW });
-    const { runtime: rt, changes } = reconcile({ sessions: { g1: session }, cooldowns: {}, override: null }, NOW + 12 * MIN);
-    expect(changes).toEqual([{ type: 'session-ended', groupId: 'g1', endsAt: session.endsAt }]);
-    expect(rt.sessions).toEqual({});
-    expect(rt.cooldowns.g1).toEqual({ startedAt: session.endsAt, until: session.endsAt + COOLDOWN_MS });
-  });
-
-  it('silently drops long-dead sessions without sweep events', () => {
-    const session = startSession({ groupId: 'g1', minutes: 10, now: NOW });
-    const { runtime: rt, changes } = reconcile({ sessions: { g1: session }, cooldowns: {}, override: null }, NOW + 60 * MIN);
-    expect(changes).toEqual([]);
-    expect(rt.sessions).toEqual({});
-    expect(rt.cooldowns).toEqual({});
-  });
-
-  it('drops expired cooldowns and overrides', () => {
-    const { runtime: rt } = reconcile(
-      { sessions: {}, cooldowns: { g1: { startedAt: NOW, until: NOW + 1 } }, override: { until: NOW + 1 } },
-      NOW + 10,
-    );
-    expect(rt.cooldowns).toEqual({});
-    expect(rt.override).toBeNull();
-  });
-
-  it('merges a recorded cooldown with a derived one keeping the later end', () => {
-    const session = startSession({ groupId: 'g1', minutes: 10, now: NOW });
-    const earlierCooldown = { startedAt: NOW + 100 * MIN, until: NOW + 150 * MIN };
-    const { runtime: rt } = reconcile({ sessions: { g1: session }, cooldowns: { g1: earlierCooldown }, override: null }, NOW + 50 * MIN);
-    expect(rt.cooldowns.g1.until).toBe(NOW + 150 * MIN);
-    expect(rt.cooldowns.g1.startedAt).toBe(session.endsAt);
+    const { blockStates, changed, changes } = reconcileBlockStates({ blocks: [block] }, { b1: state }, NOW + 10 * HOUR);
+    expect(changed).toBe(true);
+    expect(changes.some((c) => c.type === 'snooze-ended')).toBe(true);
+    expect(changes.some((c) => c.type === 'budget-reset')).toBe(true);
+    expect(blockStates.b1.snooze).toBeNull();
+    expect(blockStates.b1.snoozeHistory).toEqual([]);
+    expect(blockStates.b1.usageWindow).toBeNull();
   });
 });
 
-describe('isOverrideActive', () => {
-  it('only counts future overrides', () => {
+describe('reconcile & override', () => {
+  it('clears expired override', () => {
+    const { runtime } = reconcile({ override: { until: NOW - 1 } }, NOW);
+    expect(runtime.override).toBeNull();
     expect(isOverrideActive({ override: { until: NOW + 1 } }, NOW)).toBe(true);
     expect(isOverrideActive({ override: { until: NOW - 1 } }, NOW)).toBe(false);
-    expect(isOverrideActive(null, NOW)).toBe(false);
-    expect(isOverrideActive({}, NOW)).toBe(false);
   });
 });

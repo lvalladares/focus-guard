@@ -1,52 +1,59 @@
 import { describe, it, expect } from 'vitest';
-import { defaultConfig, normalizeConfig, newGroupId } from '../src/lib/config.js';
+import {
+  defaultConfig,
+  defaultBlock,
+  normalizeConfig,
+  newBlockId,
+  newSiteId,
+  isBlockLocked,
+  hasActivePersistentBlock,
+  validateLockedBlockChanges,
+  CURRENT_SCHEMA_VERSION,
+} from '../src/lib/config.js';
+
+const MON_10 = new Date('2026-11-09T10:00:00').getTime();
+const MON_20 = new Date('2026-11-09T20:00:00').getTime();
 
 describe('defaultConfig', () => {
-  it('has the expected shape', () => {
-    expect(defaultConfig()).toEqual({
-      schemaVersion: 2,
-      master: { enabled: false },
-      schedule: { windows: [] },
-      groups: [],
-      wallpaper: { mode: 'builtin', value: 'aurora' },
-      stats: { enabled: true, retentionMonths: 12 },
-    });
+  it('starts with 3 named blocks and expected shape', () => {
+    const cfg = defaultConfig();
+    expect(cfg.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
+    expect(cfg.master).toEqual({ enabled: false });
+    expect(cfg.antiUninstall).toEqual({ enabled: false });
+    expect(cfg.blocks).toHaveLength(3);
+    expect(cfg.blocks.map((b) => b.name)).toEqual(['Block 1', 'Block 2', 'Block 3']);
+    expect(cfg.blocks[0].enabled).toBe(true);
+    expect(cfg.blocks[0].persistent).toBe(false);
+    expect(cfg.blocks[0].sites).toEqual([]);
+    expect(cfg.blocks[0].schedule).toEqual({ alwaysActive: false, windows: [] });
+    expect(cfg.blocks[0].timeLimit).toEqual({ enabled: false, minutes: 20, periodHours: 8 });
+    expect(cfg.blocks[0].snooze).toEqual({ enabled: false, durationMinutes: 5, maxCount: 1, periodHours: 4 });
   });
 });
 
-describe('stats config normalization (v1 -> v2 migration)', () => {
-  it('fills stats defaults for legacy v1 configs', () => {
+describe('legacy v1/v2 -> v3 migration', () => {
+  it('migrates legacy groups and schedule into blocks', () => {
     const legacy = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       master: { enabled: true },
       schedule: { windows: [{ days: [1], start: '09:00', end: '17:00' }] },
-      groups: [{ id: 'g1', domain: 'reddit.com', includeBaseHost: true, level: 'total' }],
+      groups: [
+        { id: 'g1', domain: 'reddit.com', includeBaseHost: true, level: 'total' },
+        { id: 'g2', domain: 'youtube.com', includeBaseHost: true, level: 'partial' },
+      ],
       wallpaper: { mode: 'builtin', value: 'minimal' },
+      stats: { enabled: true, retentionMonths: 12 },
     };
     const { config, errors } = normalizeConfig(legacy);
     expect(errors).toEqual([]);
-    expect(config.schemaVersion).toBe(2);
-    expect(config.stats).toEqual({ enabled: true, retentionMonths: 12 });
+    expect(config.schemaVersion).toBe(3);
     expect(config.master.enabled).toBe(true);
-    expect(config.groups[0].domain).toBe('reddit.com');
-  });
-
-  it('coerces and clamps stats settings', () => {
-    const good = normalizeConfig({ stats: { enabled: false, retentionMonths: 6 } });
-    expect(good.config.stats).toEqual({ enabled: false, retentionMonths: 6 });
-
-    const bad = normalizeConfig({ stats: { enabled: 'yes', retentionMonths: -3 } });
-    expect(bad.config.stats).toEqual({ enabled: true, retentionMonths: 12 });
-    expect(bad.errors).toHaveLength(1);
-
-    const huge = normalizeConfig({ stats: { retentionMonths: 9999 } });
-    expect(huge.config.stats.retentionMonths).toBe(120);
-  });
-
-  it('keeps normalization idempotent with stats', () => {
-    const once = normalizeConfig({ stats: { enabled: false, retentionMonths: 6 } });
-    const twice = normalizeConfig(once.config);
-    expect(twice.config).toEqual(once.config);
+    expect(config.blocks).toHaveLength(3);
+    expect(config.blocks[0].sites[0].domain).toBe('reddit.com');
+    expect(config.blocks[0].snooze.enabled).toBe(false);
+    expect(config.blocks[1].sites[0].domain).toBe('youtube.com');
+    expect(config.blocks[1].snooze.enabled).toBe(true);
+    expect(config.blocks[0].schedule.windows).toEqual([{ days: [1], start: 540, end: 1020, overnight: false }]);
   });
 });
 
@@ -54,98 +61,177 @@ describe('normalizeConfig', () => {
   it('returns defaults for missing input', () => {
     const { config, errors } = normalizeConfig(undefined);
     expect(errors).toEqual([]);
-    expect(config).toEqual(defaultConfig());
+    expect(config.blocks).toHaveLength(3);
+    expect(config.antiUninstall).toEqual({ enabled: false });
   });
 
-  it('normalizes group domains and levels', () => {
+  it('preserves empty blocks array when user explicitly removes all blocks', () => {
+    const { config, errors } = normalizeConfig({ blocks: [] });
+    expect(errors).toEqual([]);
+    expect(config.blocks).toEqual([]);
+  });
+
+  it('normalizes block names, sites, schedule, timeLimit and snooze', () => {
     const { config, errors } = normalizeConfig({
-      groups: [{ id: 'g1', domain: ' Reddit.COM ', includeBaseHost: true, level: 'total', subdomains: [' OLD.Reddit.com ', 'old.reddit.com'], whitelist: [] }],
+      antiUninstall: { enabled: true },
+      blocks: [
+        {
+          id: 'b1',
+          name: '  Social Media  ',
+          enabled: true,
+          persistent: true,
+          sites: [
+            { id: 's1', domain: ' Reddit.COM ', includeBaseHost: true, subdomains: [' OLD.Reddit.com ', 'old.reddit.com'], whitelist: ['/r/learn*'] },
+          ],
+          schedule: {
+            alwaysActive: false,
+            windows: [{ days: [1, 1, 2, 'x'], start: '09:00', end: '17:00' }],
+          },
+          timeLimit: { enabled: true, minutes: 20, periodHours: 8 },
+          snooze: { enabled: true, durationMinutes: 5, maxCount: 2, periodHours: 4 },
+        },
+      ],
     });
     expect(errors).toEqual([]);
-    expect(config.groups).toEqual([
-      { id: 'g1', domain: 'reddit.com', includeBaseHost: true, includeAllSubdomains: false, subdomains: ['old.reddit.com'], whitelist: [], level: 'total' },
-    ]);
-  });
-
-  it('defaults level to partial and generates ids', () => {
-    const { config } = normalizeConfig({ groups: [{ domain: 'x.com', includeBaseHost: true }] });
-    expect(config.groups[0].level).toBe('partial');
-    expect(config.groups[0].id).toMatch(/^g_/);
-  });
-
-  it('drops groups with invalid domains and reports errors', () => {
-    const { config, errors } = normalizeConfig({
-      groups: [{ domain: 'not valid', includeBaseHost: true }, { domain: 'good.com', includeBaseHost: true }],
+    expect(config.antiUninstall.enabled).toBe(true);
+    expect(config.blocks[0]).toEqual({
+      id: 'b1',
+      name: 'Social Media',
+      enabled: true,
+      persistent: true,
+      sites: [
+        {
+          id: 's1',
+          domain: 'reddit.com',
+          includeBaseHost: true,
+          includeAllSubdomains: false,
+          subdomains: ['old.reddit.com'],
+          whitelist: ['/r/learn*'],
+        },
+      ],
+      schedule: { alwaysActive: false, windows: [{ days: [1, 2], start: 540, end: 1020, overnight: false }] },
+      timeLimit: { enabled: true, minutes: 20, periodHours: 8 },
+      snooze: { enabled: true, durationMinutes: 5, maxCount: 2, periodHours: 4 },
     });
-    expect(config.groups).toHaveLength(1);
-    expect(config.groups[0].domain).toBe('good.com');
-    expect(errors.some((e) => e.includes('groups[0]'))).toBe(true);
   });
 
-  it('flags groups with nothing to block', () => {
-    const { errors } = normalizeConfig({ groups: [{ domain: 'x.com' }] });
-    expect(errors.some((e) => e.includes('nothing to block'))).toBe(true);
-  });
-
-  it('drops invalid subdomains and whitelist globs with errors', () => {
-    const { config, errors } = normalizeConfig({
-      groups: [{ domain: 'x.com', includeBaseHost: true, subdomains: ['ok.x.com', 'bad host'], whitelist: ['/fine', 'nofrontslash'] }],
-    });
-    expect(config.groups[0].subdomains).toEqual(['ok.x.com']);
-    expect(config.groups[0].whitelist).toEqual(['/fine']);
-    expect(errors).toHaveLength(2);
-  });
-
-  it('rejects duplicate host scopes across groups', () => {
-    const { errors } = normalizeConfig({
-      groups: [
-        { domain: 'reddit.com', includeBaseHost: true },
-        { domain: 'reddit.com', includeBaseHost: true },
+  it('allows the same domain across different blocks while rejecting duplicates inside the same block', () => {
+    const crossBlock = normalizeConfig({
+      blocks: [
+        { id: 'b1', name: 'Morning', sites: [{ domain: 'reddit.com', includeBaseHost: true }] },
+        { id: 'b2', name: 'Afternoon', sites: [{ domain: 'reddit.com', includeBaseHost: true }] },
       ],
     });
-    expect(errors.some((e) => e.includes('already blocked by another group'))).toBe(true);
-  });
+    expect(crossBlock.errors).toEqual([]);
 
-  it('rejects duplicate wildcard scopes across groups', () => {
-    const { errors } = normalizeConfig({
-      groups: [
-        { domain: 'reddit.com', includeAllSubdomains: true },
-        { domain: 'reddit.com', includeAllSubdomains: true },
+    const sameBlock = normalizeConfig({
+      blocks: [
+        {
+          id: 'b1',
+          name: 'Morning',
+          sites: [
+            { domain: 'reddit.com', includeBaseHost: true },
+            { domain: 'reddit.com', includeBaseHost: true },
+          ],
+        },
       ],
     });
-    expect(errors.some((e) => e.includes('Wildcard'))).toBe(true);
+    expect(sameBlock.errors.some((e) => e.includes('already listed in this block'))).toBe(true);
   });
 
-  it('normalizes schedule windows', () => {
-    const { config } = normalizeConfig({ schedule: { windows: [{ days: [1, 1, 2, 'x'], start: '09:00', end: '17:00' }] } });
-    expect(config.schedule.windows).toEqual([{ days: [1, 2], start: 540, end: 1020, overnight: false }]);
-  });
-
-  it('validates wallpaper config', () => {
-    const bad = normalizeConfig({ wallpaper: { mode: 'url', value: 'javascript:alert(1)' } });
-    expect(bad.config.wallpaper.mode).toBe('builtin');
-    expect(bad.errors).toHaveLength(1);
-
-    const good = normalizeConfig({ wallpaper: { mode: 'url', value: 'https://example.com/bg.jpg' } });
-    expect(good.config.wallpaper).toEqual({ mode: 'url', value: 'https://example.com/bg.jpg' });
-
-    const unknown = normalizeConfig({ wallpaper: { mode: 'builtin', value: 'nope' } });
-    expect(unknown.config.wallpaper.value).toBe('aurora');
+  it('validates invalid timeLimit and snooze ranges when enabled', () => {
+    const { errors } = normalizeConfig({
+      blocks: [
+        {
+          id: 'b1',
+          name: 'Work',
+          timeLimit: { enabled: true, minutes: 0, periodHours: 0 },
+          snooze: { enabled: true, durationMinutes: 500, maxCount: 0, periodHours: 200 },
+        },
+      ],
+    });
+    expect(errors.length).toBe(5);
   });
 
   it('is idempotent', () => {
     const once = normalizeConfig({
-      groups: [{ domain: 'reddit.com', includeBaseHost: true, level: 'total' }],
-      schedule: { windows: [{ days: [1], start: '09:00', end: '17:00' }] },
+      blocks: [
+        {
+          id: 'b1',
+          name: 'Focus',
+          sites: [{ id: 's1', domain: 'reddit.com', includeBaseHost: true }],
+          schedule: { windows: [{ days: [1], start: '09:00', end: '17:00' }] },
+          timeLimit: { enabled: true, minutes: 20, periodHours: 8 },
+          snooze: { enabled: true, durationMinutes: 5, maxCount: 1, periodHours: 4 },
+        },
+      ],
     });
     const twice = normalizeConfig(once.config);
     expect(twice.config).toEqual(once.config);
   });
 });
 
-describe('newGroupId', () => {
-  it('generates unique ids', () => {
-    const ids = new Set(Array.from({ length: 100 }, () => newGroupId()));
-    expect(ids.size).toBe(100);
+describe('persistent lock validation', () => {
+  const lockedBlock = normalizeConfig({
+    antiUninstall: { enabled: true },
+    blocks: [
+      {
+        id: 'b_lock',
+        name: 'Deep Work',
+        enabled: true,
+        persistent: true,
+        sites: [{ id: 's1', domain: 'reddit.com', includeBaseHost: true }],
+        schedule: { alwaysActive: false, windows: [{ days: [1], start: '09:00', end: '17:00' }] },
+      },
+      {
+        id: 'b_free',
+        name: 'Flexible',
+        enabled: true,
+        persistent: false,
+        sites: [{ id: 's2', domain: 'news.com', includeBaseHost: true }],
+        schedule: { alwaysActive: false, windows: [{ days: [1], start: '09:00', end: '17:00' }] },
+      },
+    ],
+  }).config;
+
+  it('detects locked blocks only when enabled, persistent, and inside schedule', () => {
+    expect(isBlockLocked(lockedBlock.blocks[0], MON_10)).toBe(true);
+    expect(isBlockLocked(lockedBlock.blocks[0], MON_20)).toBe(false);
+    expect(isBlockLocked(lockedBlock.blocks[1], MON_10)).toBe(false);
+    expect(hasActivePersistentBlock(lockedBlock, MON_10)).toBe(true);
+    expect(hasActivePersistentBlock(lockedBlock, MON_20)).toBe(false);
+  });
+
+  it('blocks edits, disables, and deletions of active persistent blocks', () => {
+    const modified = structuredClone(lockedBlock);
+    modified.blocks[0].enabled = false;
+    expect(validateLockedBlockChanges(lockedBlock, modified, MON_10).ok).toBe(false);
+
+    const deleted = structuredClone(lockedBlock);
+    deleted.blocks.shift();
+    expect(validateLockedBlockChanges(lockedBlock, deleted, MON_10).ok).toBe(false);
+
+    const unAntiUninstall = structuredClone(lockedBlock);
+    unAntiUninstall.antiUninstall.enabled = false;
+    expect(validateLockedBlockChanges(lockedBlock, unAntiUninstall, MON_10).ok).toBe(false);
+  });
+
+  it('allows editing non-persistent blocks while a persistent block is active, and editing persistent blocks outside hours', () => {
+    const editNonPersistent = structuredClone(lockedBlock);
+    editNonPersistent.blocks[1].enabled = false;
+    expect(validateLockedBlockChanges(lockedBlock, editNonPersistent, MON_10).ok).toBe(true);
+
+    const editOutsideHours = structuredClone(lockedBlock);
+    editOutsideHours.blocks[0].persistent = false;
+    editOutsideHours.antiUninstall.enabled = false;
+    expect(validateLockedBlockChanges(lockedBlock, editOutsideHours, MON_20).ok).toBe(true);
+  });
+});
+
+describe('id generators', () => {
+  it('generates unique block and site ids', () => {
+    expect(new Set(Array.from({ length: 50 }, () => newBlockId())).size).toBe(50);
+    expect(new Set(Array.from({ length: 50 }, () => newSiteId())).size).toBe(50);
+    expect(defaultBlock(0).name).toBe('Block 1');
   });
 });

@@ -174,3 +174,9 @@ h1 {
 .hidden {
   display: none !important;
 }
+
+.warning {
+  color: #ffb88c;
+  font-size: 14px;
+  margin-top: 8px;
+}

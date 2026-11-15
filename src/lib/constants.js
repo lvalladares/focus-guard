@@ -3,10 +3,13 @@ export const COOLDOWN_MS = 10 * 60 * 1000;
 export const REFLECTION_SECONDS = 30;
 export const WARNING_WINDOW_MS = 60 * 1000;
 
-export const LEVELS = ['total', 'partial'];
+export const DEFAULT_BLOCK_COUNT = 3;
+export const USAGE_SYNC_INTERVAL_MS = 15 * 1000;
 
 export const STORAGE_KEYS = {
   CONFIG: 'focusConfig',
+  BLOCK_PREFIX: 'focusBlock:',
+  BLOCK_STATE_PREFIX: 'focusBlockState:',
   RUNTIME: 'focusRuntime',
 };
 

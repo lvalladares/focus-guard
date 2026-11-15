@@ -21,7 +21,14 @@ export default [
         URL: 'readonly',
         URLSearchParams: 'readonly',
         crypto: 'readonly',
+        structuredClone: 'readonly',
       },
+    },
+    rules: {
+      'no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_' },
+      ],
     },
   },
   {

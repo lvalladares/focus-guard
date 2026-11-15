@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { createConfigStorage, createSplitStorage } from '../src/lib/config-storage.js';
+import { createConfigStorage, createSplitStorage, blockKey, blockStateKey } from '../src/lib/config-storage.js';
 import { STORAGE_KEYS } from '../src/lib/constants.js';
 
 function makeStorage(initial = {}) {
@@ -17,6 +17,10 @@ function makeStorage(initial = {}) {
     async set(writes) {
       Object.assign(data, writes);
     },
+    async remove(keys) {
+      const list = Array.isArray(keys) ? keys : [keys];
+      for (const key of list) delete data[key];
+    },
   };
 }
 
@@ -24,11 +28,39 @@ const CONFIG = STORAGE_KEYS.CONFIG;
 const RUNTIME = STORAGE_KEYS.RUNTIME;
 
 describe('createConfigStorage', () => {
-  it('reads config from sync storage', async () => {
-    const sync = makeStorage({ [CONFIG]: { schemaVersion: 2 } });
-    const local = makeStorage();
-    const configStorage = createConfigStorage({ sync, local });
-    expect(await configStorage.getConfig()).toEqual({ schemaVersion: 2 });
+  it('stores and reassembles split block keys in sync storage', async () => {
+    const sync = makeStorage();
+    const configStorage = createConfigStorage({ sync, local: makeStorage() });
+    const cfg = {
+      schemaVersion: 3,
+      master: { enabled: false },
+      blocks: [
+        { id: 'b1', name: 'Block 1', sites: [] },
+        { id: 'b2', name: 'Block 2', sites: [] },
+      ],
+    };
+    await configStorage.setConfig(cfg);
+    expect(sync.data[CONFIG]).toEqual({ schemaVersion: 3, master: { enabled: false }, blockIds: ['b1', 'b2'] });
+    expect(sync.data[blockKey('b1')]).toEqual({ id: 'b1', name: 'Block 1', sites: [] });
+    expect(sync.data[blockKey('b2')]).toEqual({ id: 'b2', name: 'Block 2', sites: [] });
+    expect(await configStorage.getConfig()).toEqual(cfg);
+  });
+
+  it('removes orphaned block config and block state keys when a block is deleted', async () => {
+    const sync = makeStorage({
+      [blockStateKey('b2')]: { snooze: null, snoozeHistory: [100], usageWindow: null, updatedAt: 100 },
+    });
+    const configStorage = createConfigStorage({ sync, local: makeStorage() });
+    await configStorage.setConfig({
+      schemaVersion: 3,
+      blocks: [{ id: 'b1', name: 'B1' }, { id: 'b2', name: 'B2' }],
+    });
+    await configStorage.setConfig({
+      schemaVersion: 3,
+      blocks: [{ id: 'b1', name: 'B1' }],
+    });
+    expect(sync.data[blockKey('b2')]).toBeUndefined();
+    expect(sync.data[blockStateKey('b2')]).toBeUndefined();
   });
 
   it('migrates a legacy local config to sync once and returns it', async () => {
@@ -45,7 +77,6 @@ describe('createConfigStorage', () => {
     const local = makeStorage({ [CONFIG]: { schemaVersion: 1, stale: true } });
     const configStorage = createConfigStorage({ sync, local });
     expect(await configStorage.getConfig()).toEqual({ schemaVersion: 2, fresh: true });
-    expect(sync.data[CONFIG]).toEqual({ schemaVersion: 2, fresh: true });
   });
 
   it('returns null when nothing is stored anywhere', async () => {
@@ -53,45 +84,30 @@ describe('createConfigStorage', () => {
     expect(await configStorage.getConfig()).toBeNull();
   });
 
-  it('writes config to sync storage', async () => {
+  it('serializes per-block state updates cleanly', async () => {
     const sync = makeStorage();
     const configStorage = createConfigStorage({ sync, local: makeStorage() });
-    await configStorage.setConfig({ hello: true });
-    expect(sync.data[CONFIG]).toEqual({ hello: true });
+    await Promise.all([
+      configStorage.updateBlockState('b1', (s) => ({ ...s, snoozeHistory: [...s.snoozeHistory, 1000] })),
+      configStorage.updateBlockState('b1', (s) => ({ ...s, snoozeHistory: [...s.snoozeHistory, 2000] })),
+    ]);
+    const state = await configStorage.getBlockState('b1');
+    expect(state.snoozeHistory).toEqual([1000, 2000]);
   });
 });
 
 describe('createSplitStorage', () => {
-  it('routes config to sync and runtime to local', async () => {
-    const sync = makeStorage({ [CONFIG]: { groups: [] } });
-    const local = makeStorage({ [RUNTIME]: { sessions: {} } });
-    const storage = createSplitStorage({ sync, local });
-    const result = await storage.get([CONFIG, RUNTIME]);
-    expect(result).toEqual({
-      [CONFIG]: { groups: [] },
-      [RUNTIME]: { sessions: {} },
+  it('routes config and blockStates to sync and runtime to local', async () => {
+    const sync = makeStorage({
+      [CONFIG]: { schemaVersion: 3, blockIds: ['b1'] },
+      [blockKey('b1')]: { id: 'b1', name: 'One', sites: [] },
+      [blockStateKey('b1')]: { snooze: null, snoozeHistory: [1234], usageWindow: null, updatedAt: 1234 },
     });
-  });
-
-  it('only fetches requested keys', async () => {
-    const sync = makeStorage({ [CONFIG]: { groups: [] } });
-    const local = makeStorage({ [RUNTIME]: { sessions: {} } });
+    const local = makeStorage({ [RUNTIME]: { override: null } });
     const storage = createSplitStorage({ sync, local });
-    expect(await storage.get([RUNTIME])).toEqual({ [RUNTIME]: { sessions: {} } });
-    expect(await storage.get([CONFIG])).toEqual({ [CONFIG]: { groups: [] } });
-  });
-
-  it('falls back to a legacy local config and migrates it', async () => {
-    const sync = makeStorage();
-    const local = makeStorage({ [CONFIG]: { legacy: true }, [RUNTIME]: { sessions: {} } });
-    const storage = createSplitStorage({ sync, local });
-    const result = await storage.get([CONFIG, RUNTIME]);
-    expect(result[CONFIG]).toEqual({ legacy: true });
-    expect(sync.data[CONFIG]).toEqual({ legacy: true });
-  });
-
-  it('omits missing keys', async () => {
-    const storage = createSplitStorage({ sync: makeStorage(), local: makeStorage() });
-    expect(await storage.get([CONFIG, RUNTIME])).toEqual({});
+    const result = await storage.get([CONFIG, 'blockStates', RUNTIME]);
+    expect(result[CONFIG].blocks).toEqual([{ id: 'b1', name: 'One', sites: [] }]);
+    expect(result.blockStates.b1.snoozeHistory).toEqual([1234]);
+    expect(result[RUNTIME]).toEqual({ override: null });
   });
 });

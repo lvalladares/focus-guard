@@ -4,7 +4,9 @@ import {
   formatTime,
   normalizeWindows,
   isWithinSchedule,
+  isScheduleActive,
   nextScheduleChange,
+  nextBlocksScheduleChange,
   scheduleBlockingEnd,
 } from '../src/lib/schedule.js';
 
@@ -132,5 +134,23 @@ describe('scheduleBlockingEnd', () => {
   it('returns the morning end for overnight windows', () => {
     const schedule = { windows: [{ days: [1], start: '22:00', end: '06:00' }] };
     expect(scheduleBlockingEnd(at(MONDAY, 23), schedule)).toEqual(at(TUESDAY, 6));
+  });
+});
+
+describe('isScheduleActive & nextBlocksScheduleChange', () => {
+  it('treats alwaysActive as active 24/7 with no boundary', () => {
+    const always = { alwaysActive: true, windows: [] };
+    expect(isScheduleActive(at(SUNDAY, 3), always)).toBe(true);
+    expect(scheduleBlockingEnd(at(SUNDAY, 3), always)).toBeNull();
+    expect(nextScheduleChange(at(SUNDAY, 3), always)).toBeNull();
+  });
+
+  it('finds the earliest boundary across enabled blocks only', () => {
+    const blocks = [
+      { enabled: false, schedule: { windows: [{ days: [1], start: '08:00', end: '12:00' }] } },
+      { enabled: true, schedule: { windows: [{ days: [1], start: '11:00', end: '18:00' }] } },
+      { enabled: true, schedule: { windows: [{ days: [1], start: '09:00', end: '17:00' }] } },
+    ];
+    expect(nextBlocksScheduleChange(at(MONDAY, 10), blocks)).toEqual(at(MONDAY, 11));
   });
 });

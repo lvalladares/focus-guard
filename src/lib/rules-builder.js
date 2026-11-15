@@ -1,13 +1,21 @@
-import { hostSpecsForGroup, exactHostsRegexSource, wildcardHostRegexSource, exactHostsHostOnly, wildcardHostOnly, compilePathGlob } from './patterns.js';
-import { deriveGroupRuntime } from './sessions.js';
-import { isBlockingActive } from './decision.js';
+import {
+  hostSpecsForGroup,
+  hostnameMatchesSpec,
+  exactHostsRegexSource,
+  wildcardHostRegexSource,
+  exactHostsHostOnly,
+  wildcardHostOnly,
+  compilePathGlob,
+  pathMatchesGlob,
+} from './patterns.js';
+import { deriveBlockRuntime } from './sessions.js';
+import { isBlockActive } from './decision.js';
 import { PAGES } from './constants.js';
 
 export const MAX_REGEX_FILTER_LENGTH = 240;
 
-const OFFSET_REDIRECT = 0;
-const OFFSET_SESSION_ALLOW = 2;
-const OFFSET_WHITELIST_ALLOW = 3;
+const OFFSET_REDIRECT = 1;
+const OFFSET_WHITELIST_ALLOW = 2;
 
 function fnv1a(str) {
   let hash = 0x811c9dc5;
@@ -57,84 +65,139 @@ function redirectAction(extensionId, pagePath) {
   };
 }
 
-export function buildRules({ config, runtime, now, extensionId }) {
-  if (!isBlockingActive(now, config, runtime)) return [];
+function siteCoversGlob(site, glob) {
+  if (!Array.isArray(site.whitelist) || site.whitelist.length === 0) return false;
+  if (site.whitelist.includes(glob)) return true;
+  // Exact prefix glob is covered if another site has '/' or an identical/broader glob.
+  return site.whitelist.some((other) => other === '/' || (glob.startsWith('/') && pathMatchesGlob(glob, other)));
+}
+
+function otherBlockBlocksTarget(otherBlocks, currentBlockId, spec, glob) {
+  for (const other of otherBlocks) {
+    if (other.id === currentBlockId) continue;
+    // Find best matching site in other block for this host/base
+    const probeHost = spec.kind === 'exact' ? spec.host : `sub.${spec.base}`;
+    let best = null;
+    for (const site of other.sites || []) {
+      for (const otherSpec of hostSpecsForGroup(site)) {
+        if (!hostnameMatchesSpec(probeHost, otherSpec)) continue;
+        const specificity = (otherSpec.kind === 'exact' ? 2 : 1)
+          + (otherSpec.kind === 'wildcard' ? otherSpec.base.split('.').length * 0.01 : 0);
+        if (!best || specificity > best.specificity) {
+          best = { site, specificity };
+        }
+      }
+    }
+    if (best && !siteCoversGlob(best.site, glob)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function buildRules({ config, runtime, blockStates = {}, now, extensionId }) {
+  const blocks = (config && Array.isArray(config.blocks)) ? config.blocks : [];
+  const activeBlockingBlocks = [];
+
+  for (const block of blocks) {
+    if (!isBlockActive(block, now, config, runtime)) continue;
+    const rt = deriveBlockRuntime(block, blockStates ? blockStates[block.id] : null, now);
+    const isBlocking = rt.state === 'blocked' || rt.state === 'snoozable' || rt.state === 'snoozes-exhausted';
+    if (isBlocking) {
+      activeBlockingBlocks.push(block);
+    }
+  }
+
+  if (activeBlockingBlocks.length === 0) return [];
+
   const rules = [];
   const allocId = makeIdAllocator();
 
-  for (const group of (config && config.groups) || []) {
-    const specs = hostSpecsForGroup(group);
-    if (specs.length === 0) continue;
+  for (const block of activeBlockingBlocks) {
+    for (const site of block.sites || []) {
+      const specs = hostSpecsForGroup(site);
+      if (specs.length === 0) continue;
 
-    const exactHosts = specs.filter((s) => s.kind === 'exact').map((s) => s.host);
-    const wildcardBases = specs.filter((s) => s.kind === 'wildcard').map((s) => s.base);
+      const exactHosts = specs.filter((s) => s.kind === 'exact').map((s) => s.host);
+      const wildcardBases = specs.filter((s) => s.kind === 'wildcard').map((s) => s.base);
 
-    const rt = deriveGroupRuntime(group.id, runtime, now);
-    const kind = rt.state === 'session'
-      ? 'session-allow'
-      : (group.level === 'total' || rt.state === 'cooldown') ? 'block' : 'gate';
+      const classes = [];
+      if (exactHosts.length > 0) {
+        classes.push({ key: 'exact', tier: 100, budget: MAX_REGEX_FILTER_LENGTH - 40, isExact: true });
+      }
+      for (const base of wildcardBases) {
+        classes.push({ key: `wild:${base}`, tier: 10 + labelCount(base), isExact: false, base });
+      }
 
-    const targetPath = kind === 'gate' ? PAGES.GATE : PAGES.BLOCKED;
-
-    const classes = [];
-    if (exactHosts.length > 0) {
-      classes.push({ key: 'exact', tier: 100, budget: MAX_REGEX_FILTER_LENGTH - 40, isExact: true });
-    }
-    for (const base of wildcardBases) {
-      classes.push({ key: `wild:${base}`, tier: 10 + labelCount(base), isExact: false, base });
-    }
-
-    for (const cls of classes) {
-      const hostChunks = cls.isExact
-        ? chunkExactHosts(exactHosts, cls.budget)
-        : [null];
-      hostChunks.forEach((chunk, chunkIndex) => {
-        const regexSource = cls.isExact
-          ? exactHostsRegexSource(chunk)
-          : wildcardHostRegexSource(cls.base);
-        const regexFilter = `^(${regexSource})$`;
-        if (regexFilter.length > 256) return;
-        const priority = cls.tier * 10 + (kind === 'session-allow' ? OFFSET_SESSION_ALLOW : OFFSET_REDIRECT);
-        const id = allocId(`${group.id}|${kind}|${cls.key}|${chunkIndex}`);
-        rules.push({
-          id,
-          priority,
-          condition: {
-            regexFilter,
-            resourceTypes: ['main_frame'],
-          },
-          action: kind === 'session-allow'
-            ? { type: 'allow' }
-            : redirectAction(extensionId, targetPath),
-        });
-      });
-
-      if (kind !== 'session-allow' && Array.isArray(group.whitelist) && group.whitelist.length > 0) {
-        const whitelistBudget = MAX_REGEX_FILTER_LENGTH - 160 - (group.whitelist.reduce((max, g) => Math.max(max, String(g).length), 0));
-        for (const glob of group.whitelist) {
-          const compiled = compilePathGlob(glob);
-          if (!compiled.ok) continue;
-          const whitelistChunks = cls.isExact
-            ? chunkExactHosts(exactHosts, Math.max(40, whitelistBudget))
-            : [null];
-          whitelistChunks.forEach((chunk) => {
-            const hostOnly = cls.isExact
-              ? exactHostsHostOnly(chunk)
-              : wildcardHostOnly(cls.base);
-            const regexFilter = `^${hostOnly}(?::\\d+)?(?:${compiled.source})(?:\\?.*)?$`;
-            if (regexFilter.length > 256) return;
-            const id = allocId(`${group.id}|whitelist|${cls.key}|${glob}`);
-            const priority = cls.tier * 10 + OFFSET_WHITELIST_ALLOW;
-            rules.push({
-              id,
-              priority,
-              condition: {
-                regexFilter,
-                resourceTypes: ['main_frame'],
-              },
-              action: { type: 'allow' },
-            });
+      for (const cls of classes) {
+        const hostChunks = cls.isExact
+          ? chunkExactHosts(exactHosts, cls.budget)
+          : [null];
+        hostChunks.forEach((chunk, chunkIndex) => {
+          const regexSource = cls.isExact
+            ? exactHostsRegexSource(chunk)
+            : wildcardHostRegexSource(cls.base);
+          const regexFilter = `^(${regexSource})$`;
+          if (regexFilter.length > 256) return;
+          const priority = cls.tier * 10 + OFFSET_REDIRECT;
+          const id = allocId(`${block.id}|${site.id || site.domain}|block|${cls.key}|${chunkIndex}`);
+          rules.push({
+            id,
+            priority,
+            condition: {
+              regexFilter,
+              resourceTypes: ['main_frame'],
+            },
+            action: redirectAction(extensionId, PAGES.BLOCKED),
           });
+        });
+
+        if (Array.isArray(site.whitelist) && site.whitelist.length > 0) {
+          const whitelistBudget = MAX_REGEX_FILTER_LENGTH - 160 - site.whitelist.reduce((max, g) => Math.max(max, String(g).length), 0);
+          for (const glob of site.whitelist) {
+            const compiled = compilePathGlob(glob);
+            if (!compiled.ok) continue;
+
+            if (cls.isExact) {
+              const allowedExactHosts = exactHosts.filter(
+                (host) => !otherBlockBlocksTarget(activeBlockingBlocks, block.id, { kind: 'exact', host }, glob),
+              );
+              if (allowedExactHosts.length === 0) continue;
+              const whitelistChunks = chunkExactHosts(allowedExactHosts, Math.max(40, whitelistBudget));
+              whitelistChunks.forEach((chunk, chunkIndex) => {
+                const hostOnly = exactHostsHostOnly(chunk);
+                const regexFilter = `^${hostOnly}(?::\\d+)?(?:${compiled.source})(?:\\?.*)?$`;
+                if (regexFilter.length > 256) return;
+                const id = allocId(`${block.id}|${site.id || site.domain}|whitelist|${cls.key}|${glob}|${chunkIndex}`);
+                rules.push({
+                  id,
+                  priority: cls.tier * 10 + OFFSET_WHITELIST_ALLOW,
+                  condition: {
+                    regexFilter,
+                    resourceTypes: ['main_frame'],
+                  },
+                  action: { type: 'allow' },
+                });
+              });
+            } else {
+              if (otherBlockBlocksTarget(activeBlockingBlocks, block.id, { kind: 'wildcard', base: cls.base }, glob)) {
+                continue;
+              }
+              const hostOnly = wildcardHostOnly(cls.base);
+              const regexFilter = `^${hostOnly}(?::\\d+)?(?:${compiled.source})(?:\\?.*)?$`;
+              if (regexFilter.length > 256) continue;
+              const id = allocId(`${block.id}|${site.id || site.domain}|whitelist|${cls.key}|${glob}`);
+              rules.push({
+                id,
+                priority: cls.tier * 10 + OFFSET_WHITELIST_ALLOW,
+                condition: {
+                  regexFilter,
+                  resourceTypes: ['main_frame'],
+                },
+                action: { type: 'allow' },
+              });
+            }
+          }
         }
       }
     }

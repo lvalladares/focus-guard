@@ -13,12 +13,9 @@ function loadCore() {
 const TARGET = 'https://reddit.com/r/productivity';
 const NOW = 1700000000000;
 
-function makeChrome({ runtime, response }) {
+function makeChrome({ response }) {
   return {
     storage: {
-      local: {
-        get: (keys, cb) => cb({ focusRuntime: runtime }),
-      },
       onChanged: { addListener: vi.fn() },
     },
     runtime: {
@@ -28,9 +25,9 @@ function makeChrome({ runtime, response }) {
   };
 }
 
-function makeDeps({ runtime = { sessions: {} }, response = {}, navigate } = {}) {
+function makeDeps({ response = {}, navigate } = {}) {
   return {
-    chrome: makeChrome({ runtime, response }),
+    chrome: makeChrome({ response }),
     document,
     location: { href: TARGET, replace: vi.fn() },
     navigate: navigate || vi.fn(),
@@ -60,36 +57,53 @@ afterEach(() => {
 function getOverlay() {
   const host = document.getElementById('focus-guard-overlay-host');
   if (!host) return null;
-  return { host, card: host.shadowRoot.querySelector('.card'), time: host.shadowRoot.querySelector('.time') };
+  return {
+    host,
+    card: host.shadowRoot.querySelector('.card'),
+    label: host.shadowRoot.querySelector('.label'),
+    time: host.shadowRoot.querySelector('.time'),
+    domain: host.shadowRoot.querySelector('.domain'),
+    endBtn: host.shadowRoot.querySelector('.end'),
+  };
 }
 
 describe('focus overlay', () => {
-  it('does nothing when no sessions exist', () => {
-    const deps = makeDeps({ runtime: { sessions: {} } });
+  it('stays unmounted when overlay:check reports inactive', () => {
+    const deps = makeDeps({ response: { active: false } });
     FocusOverlay.create(deps);
-    expect(deps.chrome.runtime.sendMessage).not.toHaveBeenCalled();
+    expect(deps.chrome.runtime.sendMessage).toHaveBeenCalledWith(
+      { type: 'overlay:check', url: TARGET },
+      expect.any(Function),
+    );
     expect(document.getElementById('focus-guard-overlay-host')).toBeNull();
   });
 
-  it('shows a countdown when the session has less than a minute left', () => {
-    const response = { active: true, endsAt: NOW + 30 * 1000, domain: 'reddit.com', groupId: 'g1' };
-    const deps = makeDeps({
-      runtime: { sessions: { g1: {} } },
-      response,
-    });
+  it('shows a Snooze countdown when less than a minute remains', () => {
+    const response = { active: true, mode: 'snooze', endsAt: NOW + 30 * 1000, blockName: 'Social', blockId: 'b1' };
+    const deps = makeDeps({ response });
     FocusOverlay.create(deps);
     const overlay = getOverlay();
     expect(overlay).not.toBeNull();
     expect(overlay.host.style.display).not.toBe('none');
+    expect(overlay.label.textContent).toBe('Snooze');
     expect(overlay.time.textContent).toBe('0:30');
-    expect(overlay.card.querySelector('.domain').textContent).toBe('reddit.com');
+    expect(overlay.domain.textContent).toBe('Social');
+    expect(overlay.endBtn.classList.contains('hidden')).toBe(false);
   });
 
-  it('ticks the countdown down and redirects when time is up', () => {
+  it('shows a Time limit label and hides the end-snooze button in budget mode', () => {
+    const response = { active: true, mode: 'budget', endsAt: NOW + 45 * 1000, blockName: 'Social', blockId: 'b1' };
+    const deps = makeDeps({ response });
+    FocusOverlay.create(deps);
+    const overlay = getOverlay();
+    expect(overlay.label.textContent).toBe('Time limit');
+    expect(overlay.endBtn.classList.contains('hidden')).toBe(true);
+  });
+
+  it('ticks the countdown down and redirects when snooze time is up', () => {
     const navigate = vi.fn();
     const deps = makeDeps({
-      runtime: { sessions: { g1: {} } },
-      response: { active: true, endsAt: NOW + 30 * 1000, domain: 'reddit.com', groupId: 'g1' },
+      response: { active: true, mode: 'snooze', endsAt: NOW + 30 * 1000, blockName: 'Social', blockId: 'b1' },
       navigate,
     });
     FocusOverlay.create(deps);
@@ -103,8 +117,7 @@ describe('focus overlay', () => {
 
   it('stays hidden until the last minute when more time remains', () => {
     const deps = makeDeps({
-      runtime: { sessions: { g1: {} } },
-      response: { active: true, endsAt: NOW + 5 * 60 * 1000, domain: 'reddit.com', groupId: 'g1' },
+      response: { active: true, mode: 'snooze', endsAt: NOW + 5 * 60 * 1000, blockName: 'Social', blockId: 'b1' },
     });
     FocusOverlay.create(deps);
     const overlay = getOverlay();
@@ -115,10 +128,9 @@ describe('focus overlay', () => {
     expect(overlay.time.textContent).toBe('1:00');
   });
 
-  it('warns with a highlighted countdown in the last seconds', () => {
+  it('warns with a highlighted countdown in the last 10 seconds', () => {
     const deps = makeDeps({
-      runtime: { sessions: { g1: {} } },
-      response: { active: true, endsAt: NOW + 30 * 1000, domain: 'reddit.com', groupId: 'g1' },
+      response: { active: true, mode: 'snooze', endsAt: NOW + 30 * 1000, blockName: 'Social', blockId: 'b1' },
     });
     FocusOverlay.create(deps);
     const overlay = getOverlay();
@@ -127,10 +139,9 @@ describe('focus overlay', () => {
     expect(overlay.card.classList.contains('warn')).toBe(true);
   });
 
-  it('removes the overlay when the session is no longer active', () => {
+  it('removes the overlay when no longer active', () => {
     const deps = makeDeps({
-      runtime: { sessions: { g1: {} } },
-      response: { active: true, endsAt: NOW + 30 * 1000, domain: 'reddit.com', groupId: 'g1' },
+      response: { active: true, mode: 'snooze', endsAt: NOW + 30 * 1000, blockName: 'Social', blockId: 'b1' },
     });
     const api = FocusOverlay.create(deps);
     expect(getOverlay()).not.toBeNull();
@@ -138,18 +149,16 @@ describe('focus overlay', () => {
     expect(document.getElementById('focus-guard-overlay-host')).toBeNull();
   });
 
-  it('ends the session from the overlay button', () => {
+  it('ends snooze from the overlay button', () => {
     const navigate = vi.fn();
     const deps = makeDeps({
-      runtime: { sessions: { g1: {} } },
-      response: { active: true, endsAt: NOW + 30 * 1000, domain: 'reddit.com', groupId: 'g1' },
+      response: { active: true, mode: 'snooze', endsAt: NOW + 30 * 1000, blockName: 'Social', blockId: 'b1' },
       navigate,
     });
     FocusOverlay.create(deps);
-    const overlay = getOverlay();
-    overlay.card.querySelector('.end').click();
+    getOverlay().endBtn.click();
     expect(deps.chrome.runtime.sendMessage).toHaveBeenCalledWith(
-      { type: 'session:end', groupId: 'g1' },
+      { type: 'snooze:end', blockId: 'b1' },
       expect.any(Function),
     );
     expect(navigate).toHaveBeenCalledWith(
@@ -157,16 +166,15 @@ describe('focus overlay', () => {
     );
   });
 
-  it('re-checks when runtime storage changes', () => {
-    const deps = makeDeps({
-      runtime: { sessions: { g1: {} } },
-      response: { active: true, endsAt: NOW + 30 * 1000, domain: 'reddit.com', groupId: 'g1' },
-    });
+  it('re-checks when sync or runtime storage changes', () => {
+    const deps = makeDeps({ response: { active: false } });
     FocusOverlay.create(deps);
     const listener = deps.chrome.storage.onChanged.addListener.mock.calls[0][0];
-    listener({ focusRuntime: { newValue: { sessions: { g1: {} } } } }, 'local');
-    expect(deps.chrome.runtime.sendMessage.mock.calls.length).toBeGreaterThanOrEqual(2);
-    listener({ otherKey: {} }, 'local');
-    expect(deps.chrome.runtime.sendMessage.mock.calls.length).toBeGreaterThanOrEqual(2);
+    listener({ 'focusBlockState:b1': { newValue: {} } }, 'sync');
+    expect(deps.chrome.runtime.sendMessage).toHaveBeenCalledTimes(2);
+    listener({ focusRuntime: { newValue: {} } }, 'local');
+    expect(deps.chrome.runtime.sendMessage).toHaveBeenCalledTimes(3);
+    listener({ unrelated: {} }, 'sync');
+    expect(deps.chrome.runtime.sendMessage).toHaveBeenCalledTimes(3);
   });
 });

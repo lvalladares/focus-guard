@@ -30,32 +30,33 @@
     </section>
 
     <nav class="tabs" id="tabs">
-      <button class="tab on" data-tab="sites" type="button">Sites</button>
-      <button class="tab" data-tab="schedule" type="button">Schedule</button>
+      <button class="tab on" data-tab="blocks" type="button">Blocks</button>
       <button class="tab" data-tab="wallpaper" type="button">Wallpaper</button>
       <button class="tab" data-tab="stats" type="button">Stats</button>
     </nav>
 
-    <section class="card" data-tab-section="sites">
-      <div class="section-head">
-        <h2>Distracting sites</h2>
-        <div class="add-domain">
-          <input type="text" id="new-domain" placeholder="example.com" spellcheck="false" autocomplete="off">
-          <button class="btn btn-primary" id="btn-add-domain">Add</button>
+    <section data-tab-section="blocks">
+      <div class="card protection-card">
+        <div class="section-head">
+          <h2>Anti-uninstall protection</h2>
+          <span class="lock-pill hidden" id="anti-uninstall-lock">Locked while persistent block active</span>
         </div>
+        <label class="check-row">
+          <input type="checkbox" id="anti-uninstall-enabled">
+          <span>Block access to <code>chrome://extensions</code> while at least one <strong>persistent</strong> block is active</span>
+        </label>
+        <p class="muted small protection-note">Adds strong in-browser friction against disabling or removing Focus Guard during locked focus hours. Note: as an unpacked Chrome extension, it cannot block OS-level file deletion or command-line flags.</p>
       </div>
-      <p class="muted small">Type or paste a domain, subdomain or full URL — no <code>https://</code> needed, and <code>www.</code> is ignored, so <code>example.com</code> covers <code>http</code>/<code>https</code> and <code>www</code>/non-<code>www</code> automatically. Add specific subdomains or enable the wildcard to cover <code>*.domain</code>. Grouped hosts share one blocking level, doses and cooldowns. Whitelisted paths are always allowed — paste a URL there too and only its path is kept.</p>
-      <div id="groups-list"></div>
-      <div class="muted small empty-hint" id="groups-empty">No sites blocked yet. Add the first one above — you know the one.</div>
-    </section>
 
-    <section class="card" data-tab-section="schedule" hidden>
-      <div class="section-head">
-        <h2>Focus schedule</h2>
-        <button class="btn" id="btn-clear-schedule">Clear all</button>
+      <div class="card blocks-container">
+        <div class="section-head">
+          <h2>Focus blocks</h2>
+          <button class="btn btn-primary" id="btn-add-block" type="button">+ Add block</button>
+        </div>
+        <p class="muted small">Each block groups websites with its own weekday/hour schedule, optional global time limit (shared across all sites in the block), snooze allowance, and persistent lock mode. All block rules and timers sync across your computers.</p>
+        <div id="blocks-list"></div>
+        <div class="muted small empty-hint hidden" id="blocks-empty">No blocks configured. Click "+ Add block" to create one.</div>
       </div>
-      <p class="muted small">While the schedule is active, blocking turns itself on and turning it off requires a 30-second reflection. Windows may cross midnight (e.g. 22:00 → 06:00).</p>
-      <div id="schedule-editor"></div>
     </section>
 
     <section class="card" data-tab-section="wallpaper" hidden>

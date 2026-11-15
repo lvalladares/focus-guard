@@ -1,53 +1,71 @@
-import { isWithinSchedule, scheduleBlockingEnd, nextScheduleChange, DAY_LABELS } from '../../lib/schedule.js';
-import { isOverrideActive } from '../../lib/sessions.js';
-import { isBlockingActive } from '../../lib/decision.js';
+import { isScheduleActive, scheduleBlockingEnd, nextBlocksScheduleChange, DAY_LABELS } from '../../lib/schedule.js';
+import { isOverrideActive, deriveBlockRuntime } from '../../lib/sessions.js';
+import { isBlockActive, isBlockingActive, isAntiUninstallActive } from '../../lib/decision.js';
+import { isBlockLocked } from '../../lib/config.js';
 import { formatDuration, formatClockTime } from '../../lib/format.js';
 import { randomQuoteIndex, QUOTES } from '../../lib/quotes.js';
 import { REFLECTION_SECONDS } from '../../lib/constants.js';
 
-export function computeStatus(config, runtime, now) {
+export function computeStatus(config, runtime, now, blockStates = {}) {
   const date = new Date(now);
-  const inSchedule = isWithinSchedule(date, config.schedule);
+  const blocks = (config && Array.isArray(config.blocks)) ? config.blocks : [];
+
+  const activeBlocks = blocks.filter((b) => isBlockActive(b, now, config, runtime));
+  const lockedBlocks = blocks.filter((b) => isBlockLocked(b, now));
+  const scheduledBlocks = blocks.filter((b) => b.enabled && isScheduleActive(date, b.schedule));
+  const hasNonPersistentScheduled = scheduledBlocks.some((b) => !b.persistent);
+  const inSchedule = scheduledBlocks.length > 0;
   const overrideActive = isOverrideActive(runtime, now);
   const blockingActive = isBlockingActive(now, config, runtime);
-  const windowEnd = inSchedule ? scheduleBlockingEnd(date, config.schedule) : null;
-  const nextChange = nextScheduleChange(date, config.schedule);
-  const groups = (config && config.groups) || [];
-  const activeSessions = Object.entries((runtime && runtime.sessions) || {})
-    .filter(([, session]) => session.endsAt > now)
-    .map(([groupId, session]) => {
-      const group = groups.find((g) => g.id === groupId);
-      return {
-        groupId,
-        domain: group ? group.domain : groupId,
-        level: group ? group.level : null,
-        endsAt: session.endsAt,
-        minutes: session.minutes,
-        remainingMs: session.endsAt - now,
-      };
-    });
-  const cooldowns = Object.entries((runtime && runtime.cooldowns) || {})
-    .filter(([, cooldown]) => cooldown.until > now)
-    .map(([groupId, cooldown]) => {
-      const group = groups.find((g) => g.id === groupId);
-      return {
-        groupId,
-        domain: group ? group.domain : groupId,
-        level: group ? group.level : null,
-        until: cooldown.until,
-        remainingMs: cooldown.until - now,
-      };
-    });
+  const nextChange = nextBlocksScheduleChange(date, blocks);
+
+  const activeSnoozes = [];
+  const activeBudgets = [];
+  for (const block of activeBlocks) {
+    const rt = deriveBlockRuntime(block, blockStates ? blockStates[block.id] : null, now);
+    if (rt.state === 'snooze') {
+      activeSnoozes.push({
+        blockId: block.id,
+        blockName: block.name,
+        endsAt: rt.snooze.endsAt,
+        durationMinutes: rt.snooze.durationMinutes,
+        remainingMs: rt.remainingMs,
+      });
+    } else if (rt.state === 'budget') {
+      activeBudgets.push({
+        blockId: block.id,
+        blockName: block.name,
+        remainingMs: rt.budgetRemainingMs,
+        limitMs: rt.limitMs,
+        resetAt: rt.budgetResetAt,
+      });
+    }
+  }
+
+  let earliestWindowEnd = null;
+  for (const b of scheduledBlocks) {
+    const end = scheduleBlockingEnd(date, b.schedule);
+    if (end && (!earliestWindowEnd || end.getTime() < earliestWindowEnd.getTime())) {
+      earliestWindowEnd = end;
+    }
+  }
+
   return {
     inSchedule,
+    hasNonPersistentScheduled,
+    hasLockedBlock: lockedBlocks.length > 0,
+    lockedBlockCount: lockedBlocks.length,
+    activeBlockCount: activeBlocks.length,
+    antiUninstallEnabled: Boolean(config && config.antiUninstall && config.antiUninstall.enabled),
+    antiUninstallActive: isAntiUninstallActive(config, now),
     overrideActive,
     overrideUntil: overrideActive && runtime.override ? runtime.override.until : null,
     blockingActive,
-    masterEnabled: Boolean(config.master && config.master.enabled),
-    windowEnd,
+    masterEnabled: Boolean(config && config.master && config.master.enabled),
+    windowEnd: earliestWindowEnd,
     nextChange,
-    activeSessions,
-    cooldowns,
+    activeSnoozes,
+    activeBudgets,
   };
 }
 
@@ -57,26 +75,32 @@ export function statusSummary(status) {
       return {
         title: 'Blocking is paused',
         subtitle: status.overrideUntil
-          ? `Inside your focus window. It turns back on at ${formatClockTime(new Date(status.overrideUntil))}.`
-          : 'Inside your focus window. It turns back on when this window ends.',
+          ? `Non-persistent scheduled blocks are paused until ${formatClockTime(new Date(status.overrideUntil))}.`
+          : 'Non-persistent scheduled blocks are paused until their window ends.',
       };
     }
     return {
       title: 'Blocking is off',
-      subtitle: 'Outside your focus hours. Flip the switch to lock in a focus session anytime.',
+      subtitle: 'No focus block is currently active. Flip the switch to turn on enabled blocks anytime.',
+    };
+  }
+  if (status.hasLockedBlock) {
+    return {
+      title: 'Focus mode is locked on',
+      subtitle: `${status.lockedBlockCount} persistent ${status.lockedBlockCount === 1 ? 'block is' : 'blocks are'} active and cannot be edited or disabled during scheduled hours.`,
     };
   }
   if (status.inSchedule) {
     return {
       title: 'Focus mode is on',
       subtitle: status.windowEnd
-        ? `Scheduled focus window — blocking until ${formatClockTime(status.windowEnd)}.`
-        : 'Scheduled focus window active.',
+        ? `Scheduled focus blocks active (next end at ${formatClockTime(status.windowEnd)}).`
+        : 'Scheduled focus blocks are active.',
     };
   }
   return {
     title: 'Focus mode is on',
-    subtitle: 'Manually enabled outside your schedule. Turn it off freely when you are done.',
+    subtitle: 'Manually enabled outside block schedules. Turn it off freely when you are done.',
   };
 }
 
@@ -102,14 +126,14 @@ export function createReflectionModal(deps) {
   overlay.innerHTML = `
     <div class="reflection-card" role="dialog" aria-modal="true">
       <p class="reflection-eyebrow">Think it over</p>
-      <h2 class="reflection-headline">Turn off focus blocking?</h2>
-      <p class="reflection-sub">You are inside your focus window. This is the moment your future self is watching.</p>
+      <h2 class="reflection-headline">Pause non-persistent blocks?</h2>
+      <p class="reflection-sub">You are inside a scheduled focus window. Persistent blocks will remain locked and active.</p>
       <div class="reflection-countdown" data-ref="countdown"></div>
       <p class="reflection-hint" data-ref="hint">You can confirm in a moment. Meanwhile…</p>
       <blockquote class="reflection-quote" data-ref="quote"></blockquote>
       <p class="reflection-author" data-ref="author"></p>
       <div class="reflection-actions">
-        <button class="btn btn-primary" data-ref="confirm" disabled>Keep it off</button>
+        <button class="btn btn-primary" data-ref="confirm" disabled>Pause non-persistent blocks</button>
         <button class="btn" data-ref="cancel">Cancel — I'll stay focused</button>
       </div>
     </div>
@@ -173,51 +197,101 @@ export function createReflectionModal(deps) {
   return { destroy };
 }
 
-export function collectGroupsFromDom(cards, makeId) {
-  const groups = [];
-  for (const card of cards) {
-    const domainInput = card.querySelector('.group-domain');
-    const levelPill = card.querySelector('.level-pill.on');
-    const includeBase = card.querySelector('.group-include-base');
-    const includeSubdomains = card.querySelector('.group-include-subdomains');
-    const subdomains = [...card.querySelectorAll('[data-kind="subdomain"]')].map((el) => el.dataset.value);
-    const whitelist = [...card.querySelectorAll('[data-kind="whitelist"]')].map((el) => el.dataset.value);
-    groups.push({
-      id: card.dataset.groupId || makeId(),
+export function collectSitesFromCard(card, makeSiteId) {
+  const sites = [];
+  for (const row of card.querySelectorAll('.site-card')) {
+    const domainInput = row.querySelector('.site-domain');
+    const includeBase = row.querySelector('.site-include-base');
+    const includeSubdomains = row.querySelector('.site-include-subdomains');
+    const subdomains = [...row.querySelectorAll('[data-kind="subdomain"]')].map((el) => el.dataset.value);
+    const whitelist = [...row.querySelectorAll('[data-kind="whitelist"]')].map((el) => el.dataset.value);
+    sites.push({
+      id: row.dataset.siteId || makeSiteId(),
       domain: domainInput ? domainInput.value : '',
       includeBaseHost: includeBase ? includeBase.checked : false,
       includeAllSubdomains: includeSubdomains ? includeSubdomains.checked : false,
       subdomains,
       whitelist,
-      level: levelPill && levelPill.dataset.level === 'total' ? 'total' : 'partial',
     });
   }
-  return groups;
+  return sites;
 }
 
-export function collectScheduleFromDom(rows) {
+export function collectBlockScheduleFromCard(card, blockName) {
+  const alwaysActiveInput = card.querySelector('.block-always-active');
+  const alwaysActive = Boolean(alwaysActiveInput && alwaysActiveInput.checked);
   const windows = [];
   const errors = [];
-  for (const row of rows) {
-    const day = Number(row.dataset.day);
-    if (!Number.isInteger(day) || day < 0 || day > 6) continue;
-    const ranges = row.querySelectorAll('.schedule-range');
-    ranges.forEach((range, index) => {
-      const start = range.querySelector('.range-start') ? range.querySelector('.range-start').value : '';
-      const end = range.querySelector('.range-end') ? range.querySelector('.range-end').value : '';
-      if (!start || !end) {
-        errors.push({ day, index, message: `${DAY_LABELS[day]} range ${index + 1} needs both start and end times` });
-        return;
-      }
-      if (start === end) {
-        errors.push({ day, index, message: `${DAY_LABELS[day]} range ${index + 1} starts and ends at the same time` });
-        return;
-      }
-      windows.push({ days: [day], start, end });
+  const rows = card.querySelectorAll('.window-row');
+  rows.forEach((row, index) => {
+    const days = [...row.querySelectorAll('.day-pill.on')]
+      .map((btn) => Number(btn.dataset.day))
+      .filter((d) => Number.isInteger(d) && d >= 0 && d <= 6);
+    const start = row.querySelector('.range-start') ? row.querySelector('.range-start').value : '';
+    const end = row.querySelector('.range-end') ? row.querySelector('.range-end').value : '';
+    if (days.length === 0) {
+      errors.push({ blockName, index, message: `${blockName} window ${index + 1}: select at least one day` });
+      return;
+    }
+    if (!start || !end) {
+      errors.push({ blockName, index, message: `${blockName} window ${index + 1}: needs both start and end times` });
+      return;
+    }
+    if (start === end) {
+      errors.push({ blockName, index, message: `${blockName} window ${index + 1}: start and end cannot be the same` });
+      return;
+    }
+    windows.push({ days, start, end });
+  });
+  return { schedule: { alwaysActive, windows }, errors };
+}
+
+export function collectBlocksFromDom(cards, { makeBlockId, makeSiteId }) {
+  const blocks = [];
+  const scheduleErrors = [];
+  for (const card of cards) {
+    const nameInput = card.querySelector('.block-name');
+    const name = (nameInput ? nameInput.value.trim() : '') || 'Block';
+    const enabledInput = card.querySelector('.block-enabled');
+    const persistentInput = card.querySelector('.block-persistent');
+
+    const sites = collectSitesFromCard(card, makeSiteId);
+    const { schedule, errors } = collectBlockScheduleFromCard(card, name);
+    scheduleErrors.push(...errors);
+
+    const limitEnabled = card.querySelector('.limit-enabled');
+    const limitMinutes = card.querySelector('.limit-minutes');
+    const limitHours = card.querySelector('.limit-hours');
+
+    const snoozeEnabled = card.querySelector('.snooze-enabled');
+    const snoozeDuration = card.querySelector('.snooze-duration');
+    const snoozeMax = card.querySelector('.snooze-max');
+    const snoozeHours = card.querySelector('.snooze-hours');
+
+    blocks.push({
+      id: card.dataset.blockId || makeBlockId(),
+      name,
+      enabled: enabledInput ? enabledInput.checked : true,
+      persistent: persistentInput ? persistentInput.checked : false,
+      sites,
+      schedule,
+      timeLimit: {
+        enabled: limitEnabled ? limitEnabled.checked : false,
+        minutes: limitMinutes ? Number(limitMinutes.value) : 20,
+        periodHours: limitHours ? Number(limitHours.value) : 8,
+      },
+      snooze: {
+        enabled: snoozeEnabled ? snoozeEnabled.checked : false,
+        durationMinutes: snoozeDuration ? Number(snoozeDuration.value) : 5,
+        maxCount: snoozeMax ? Number(snoozeMax.value) : 1,
+        periodHours: snoozeHours ? Number(snoozeHours.value) : 4,
+      },
     });
   }
-  return { windows, errors };
+  return { blocks, scheduleErrors };
 }
+
+export { DAY_LABELS };
 
 export function escapeHtml(value) {
   return String(value)

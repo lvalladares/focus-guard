@@ -2,16 +2,25 @@ import {
   computeStatus,
   statusSummary,
   createReflectionModal,
-  collectGroupsFromDom,
-  collectScheduleFromDom,
+  collectBlocksFromDom,
   escapeHtml,
 } from './settings-logic.js';
 import { buildStatsModel, statsTableHtml, formatHours } from './stats-logic.js';
-import { normalizeConfig, defaultConfig, newGroupId } from '../../lib/config.js';
+import {
+  normalizeConfig,
+  defaultConfig,
+  defaultBlock,
+  newBlockId,
+  newSiteId,
+  isBlockLocked,
+  hasActivePersistentBlock,
+} from '../../lib/config.js';
+import { isBlockActive } from '../../lib/decision.js';
+import { deriveBlockRuntime } from '../../lib/sessions.js';
+import { scheduleBlockingEnd, formatTime, DAY_LABELS } from '../../lib/schedule.js';
 import { normalizeHostname, compilePathGlob } from '../../lib/patterns.js';
 import { formatDuration, formatClockTime } from '../../lib/format.js';
 import { WALLPAPERS } from '../../lib/wallpapers.js';
-import { formatTime, DAY_LABELS } from '../../lib/schedule.js';
 import { periodStart, dayKeysBetween } from '../../lib/dates.js';
 import { createConfigStorage } from '../../lib/config-storage.js';
 import { createStatsStorage } from '../../lib/stats-storage.js';
@@ -22,9 +31,10 @@ const statsStorage = createStatsStorage({ storage });
 const configStorage = createConfigStorage({ sync: chrome.storage.sync, local: chrome.storage.local });
 
 let config = defaultConfig();
-let runtime = { sessions: {}, cooldowns: {}, override: null };
+let blockStates = {};
+let runtime = { override: null };
 let dirty = false;
-let activeTab = 'sites';
+let activeTab = 'blocks';
 let statsPeriod = 'today';
 let statsQuery = '';
 let statsExpanded = new Set();
@@ -42,13 +52,18 @@ function sendMessage(msg) {
 }
 
 async function loadState() {
+  const response = await sendMessage({ type: 'state:get' });
+  if (response && response.ok && response.config) {
+    config = normalizeConfig(response.config).config;
+    blockStates = response.blockStates || {};
+    runtime = response.runtime || { override: null };
+    return;
+  }
   const storedConfig = await configStorage.getConfig();
-  const store = await storage.get([STORAGE_KEYS.RUNTIME]);
-  // Normalize on load so legacy entries (e.g. `www.`-prefixed hosts or pasted URLs
-  // saved by an older version) display — and are edited — in canonical form, exactly
-  // like what the service worker enforces.
   config = storedConfig ? normalizeConfig(storedConfig).config : defaultConfig();
-  runtime = store[STORAGE_KEYS.RUNTIME] || { sessions: {}, cooldowns: {}, override: null };
+  blockStates = await configStorage.getBlockStates(config.blocks.map((b) => b.id));
+  const store = await storage.get([STORAGE_KEYS.RUNTIME]);
+  runtime = store[STORAGE_KEYS.RUNTIME] || { override: null };
 }
 
 function el(id) {
@@ -57,14 +72,14 @@ function el(id) {
 
 function renderAll() {
   renderStatus();
-  renderGroups();
-  renderSchedule();
+  renderProtection();
+  renderBlocks();
   renderWallpaper();
   renderStatsSettings();
 }
 
 function activateTab(name) {
-  if (!['sites', 'schedule', 'wallpaper', 'stats'].includes(name)) name = 'sites';
+  if (!['blocks', 'wallpaper', 'stats'].includes(name)) name = 'blocks';
   activeTab = name;
   document.querySelectorAll('#tabs .tab').forEach((tab) => {
     tab.classList.toggle('on', tab.dataset.tab === name);
@@ -101,42 +116,19 @@ function renderStatsSettings() {
   el('stats-retention').value = String(stats.retentionMonths);
 }
 
-async function onQuickBlock(domain) {
-  const parsed = normalizeHostname(domain);
-  const host = parsed.ok ? parsed.hostname : domain;
-  const draft = collectDraft();
-  const alreadyGrouped = draft.config.groups.some((g) => {
-    const existing = normalizeHostname(g.domain);
-    return existing.ok ? existing.hostname === host : g.domain === host;
-  });
-  if (alreadyGrouped) {
-    activateTab('sites');
-    return;
-  }
-  draft.config.groups.push({
-    id: newGroupId(),
-    domain: host,
-    includeBaseHost: true,
-    includeAllSubdomains: false,
-    subdomains: [],
-    whitelist: [],
-    level: 'total',
-  });
-  config = draft.config;
-  renderGroups();
-  markDirty();
-  activateTab('sites');
-  const card = document.querySelector(`.group[data-group-id="${config.groups[config.groups.length - 1].id}"]`);
-  if (card) {
-    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    card.classList.add('flash');
-    setTimeout(() => card.classList.remove('flash'), 1600);
-  }
+function renderProtection() {
+  const now = Date.now();
+  const enabled = Boolean(config.antiUninstall && config.antiUninstall.enabled);
+  const locked = enabled && hasActivePersistentBlock(config, now);
+  const checkbox = el('anti-uninstall-enabled');
+  checkbox.checked = enabled;
+  checkbox.disabled = locked;
+  el('anti-uninstall-lock').classList.toggle('hidden', !locked);
 }
 
 function renderStatus() {
   const now = Date.now();
-  const status = computeStatus(config, runtime, now);
+  const status = computeStatus(config, runtime, now, blockStates);
   const summary = statusSummary(status);
 
   const toggle = el('master-toggle');
@@ -151,15 +143,13 @@ function renderStatus() {
 
   tiles.push(`
     <div class="status-tile">
-      <div class="label">Focus window</div>
-      <div class="value">${status.inSchedule
-    ? (status.windowEnd ? `until ${formatClockTime(status.windowEnd)}` : 'active')
-    : 'outside hours'}</div>
+      <div class="label">Active blocks</div>
+      <div class="value">${status.activeBlockCount} of ${config.blocks.length}${status.hasLockedBlock ? ` (${status.lockedBlockCount} locked)` : ''}</div>
     </div>`);
 
   tiles.push(`
     <div class="status-tile">
-      <div class="label">Next change</div>
+      <div class="label">Next schedule change</div>
       <div class="value">${status.nextChange
     ? `${DAY_LABELS[status.nextChange.getDay()].slice(0, 3)} ${formatClockTime(status.nextChange)}`
     : 'no schedule set'}</div>
@@ -171,48 +161,45 @@ function renderStatus() {
       <div class="value">${status.masterEnabled ? 'on (outside hours)' : 'off'}</div>
     </div>`);
 
-  for (const session of status.activeSessions) {
+  for (const snooze of status.activeSnoozes) {
     tiles.push(`
       <div class="status-tile">
-        <div class="label">Dose — ${escapeHtml(session.domain)}</div>
-        <div class="value ok">${formatDuration(session.remainingMs)} left</div>
+        <div class="label">Snooze — ${escapeHtml(snooze.blockName)}</div>
+        <div class="value ok">${formatDuration(snooze.remainingMs)} left</div>
       </div>`);
   }
-  for (const cooldown of status.cooldowns) {
+  for (const budget of status.activeBudgets) {
     tiles.push(`
       <div class="status-tile">
-        <div class="label">Cooldown — ${escapeHtml(cooldown.domain)}</div>
-        <div class="value off">${formatDuration(cooldown.remainingMs)}</div>
+        <div class="label">Time budget — ${escapeHtml(budget.blockName)}</div>
+        <div class="value">${formatDuration(budget.remainingMs)} left</div>
       </div>`);
   }
 
   el('status-extra').innerHTML = tiles.join('');
 }
 
-function chipHtml(kind, value) {
-  return `<span class="chip" data-kind="${kind}" data-value="${escapeHtml(value)}">${escapeHtml(value)}<button type="button" data-action="remove-chip" title="Remove">×</button></span>`;
+function chipHtml(kind, value, disabledAttr) {
+  return `<span class="chip" data-kind="${kind}" data-value="${escapeHtml(value)}">${escapeHtml(value)}<button type="button" data-action="remove-chip" title="Remove" ${disabledAttr}>×</button></span>`;
 }
 
-function groupHtml(group) {
-  const domain = escapeHtml(group.domain);
-  const subdomainChips = (group.subdomains || []).map((s) => chipHtml('subdomain', s)).join('');
-  const whitelistChips = (group.whitelist || []).map((w) => chipHtml('whitelist', w)).join('');
+function siteCardHtml(site, disabledAttr) {
+  const domain = escapeHtml(site.domain);
+  const subdomainChips = (site.subdomains || []).map((s) => chipHtml('subdomain', s, disabledAttr)).join('');
+  const whitelistChips = (site.whitelist || []).map((w) => chipHtml('whitelist', w, disabledAttr)).join('');
   return `
-    <div class="group" data-group-id="${escapeHtml(group.id)}">
-      <div class="group-head">
-        <input type="text" class="group-domain" value="${domain}" placeholder="domain.com" spellcheck="false" autocomplete="off">
-        <div class="group-level">
-          <button type="button" class="level-pill ${group.level === 'total' ? 'on' : ''}" data-level="total">Total block</button>
-          <button type="button" class="level-pill ${group.level === 'partial' ? 'on' : ''}" data-level="partial">Partial (doses)</button>
-        </div>
+    <div class="site-card" data-site-id="${escapeHtml(site.id)}">
+      <div class="site-head">
+        <input type="text" class="site-domain" value="${domain}" placeholder="domain.com" spellcheck="false" autocomplete="off" ${disabledAttr}>
+        <button type="button" class="btn btn-small btn-danger" data-action="remove-site" ${disabledAttr}>Remove</button>
       </div>
       <div class="group-options">
         <label class="check-row">
-          <input type="checkbox" class="group-include-base" ${group.includeBaseHost ? 'checked' : ''}>
+          <input type="checkbox" class="site-include-base" ${site.includeBaseHost ? 'checked' : ''} ${disabledAttr}>
           <span>Block <code>${domain || 'domain'}</code> itself <span class="muted">— exact host, www twin included</span></span>
         </label>
         <label class="check-row">
-          <input type="checkbox" class="group-include-subdomains" ${group.includeAllSubdomains ? 'checked' : ''}>
+          <input type="checkbox" class="site-include-subdomains" ${site.includeAllSubdomains ? 'checked' : ''} ${disabledAttr}>
           <span>All subdomains <span class="muted">— <code>*.${domain || 'domain'}</code></span></span>
         </label>
       </div>
@@ -220,58 +207,185 @@ function groupHtml(group) {
         <label>Specific subdomains</label>
         <div class="chips">
           ${subdomainChips}
-          <input type="text" class="chip-input" data-chip-kind="subdomain" placeholder="old.${domain || 'domain'}" spellcheck="false" autocomplete="off">
-          <button type="button" class="btn chip-add" data-action="add-chip">Add</button>
+          <input type="text" class="chip-input" data-chip-kind="subdomain" placeholder="old.${domain || 'domain'}" spellcheck="false" autocomplete="off" ${disabledAttr}>
+          <button type="button" class="btn chip-add" data-action="add-chip" ${disabledAttr}>Add</button>
         </div>
       </div>
       <div class="chip-section">
         <label>Whitelisted paths — always allowed</label>
         <div class="chips">
           ${whitelistChips}
-          <input type="text" class="chip-input" data-chip-kind="whitelist" placeholder="/r/learn* or paste a URL" spellcheck="false" autocomplete="off">
-          <button type="button" class="btn chip-add" data-action="add-chip">Add</button>
+          <input type="text" class="chip-input" data-chip-kind="whitelist" placeholder="/r/learn* or paste a URL" spellcheck="false" autocomplete="off" ${disabledAttr}>
+          <button type="button" class="btn chip-add" data-action="add-chip" ${disabledAttr}>Add</button>
         </div>
-      </div>
-      <div class="group-foot">
-        <span class="muted small">Changes apply after saving</span>
-        <button type="button" class="btn btn-danger" data-action="delete-group">Delete</button>
       </div>
     </div>`;
 }
 
-function renderGroups() {
-  const list = el('groups-list');
-  list.innerHTML = (config.groups || []).map(groupHtml).join('');
-  el('groups-empty').classList.toggle('hidden', (config.groups || []).length > 0);
-}
+const DAY_ORDER = [1, 2, 3, 4, 5, 6, 0];
 
-function scheduleRangeHtml(start, end) {
-  return `
-    <div class="schedule-range">
-      <input type="time" class="range-start" value="${start}">
-      <span class="muted">→</span>
-      <input type="time" class="range-end" value="${end}">
-      <button type="button" class="range-remove" data-action="remove-range" title="Remove range">×</button>
-    </div>`;
-}
-
-function renderSchedule() {
-  const order = [1, 2, 3, 4, 5, 6, 0];
-  const windows = (config.schedule && config.schedule.windows) || [];
-  el('schedule-editor').innerHTML = order.map((day) => {
-    const ranges = windows
-      .filter((w) => w.days.includes(day))
-      .map((w) => scheduleRangeHtml(formatTime(w.start), formatTime(w.end)))
-      .join('');
-    return `
-      <div class="day-row" data-day="${day}">
-        <div class="day-name">${DAY_LABELS[day]}</div>
-        <div class="day-ranges">
-          ${ranges || '<span class="muted small">No focus window</span>'}
-          <button type="button" class="btn range-add" data-action="add-range">+ Add range</button>
-        </div>
-      </div>`;
+function windowRowHtml(win, disabledAttr) {
+  const days = Array.isArray(win.days) ? win.days : [1, 2, 3, 4, 5];
+  const start = typeof win.start === 'number' ? formatTime(win.start) : (win.start || '09:00');
+  const end = typeof win.end === 'number' ? formatTime(win.end) : (win.end || '17:00');
+  const dayPills = DAY_ORDER.map((d) => {
+    const on = days.includes(d) ? 'on' : '';
+    const label = DAY_LABELS[d].slice(0, 3);
+    return `<button type="button" class="day-pill ${on}" data-action="toggle-day" data-day="${d}" ${disabledAttr}>${label}</button>`;
   }).join('');
+  return `
+    <div class="window-row">
+      <div class="day-pills">${dayPills}</div>
+      <div class="schedule-range">
+        <input type="time" class="range-start" value="${escapeHtml(start)}" ${disabledAttr}>
+        <span class="muted">→</span>
+        <input type="time" class="range-end" value="${escapeHtml(end)}" ${disabledAttr}>
+        <button type="button" class="range-remove" data-action="remove-window" title="Remove window" ${disabledAttr}>×</button>
+      </div>
+    </div>`;
+}
+
+function runtimeSummaryForBlock(block, rt) {
+  const parts = [];
+  if (block.timeLimit && block.timeLimit.enabled) {
+    if (rt.state === 'budget') {
+      parts.push(`Time budget: ${formatDuration(rt.budgetRemainingMs)} left`);
+    } else if (rt.budgetResetAt) {
+      parts.push(`Time budget used (resets at ${formatClockTime(new Date(rt.budgetResetAt))})`);
+    } else {
+      parts.push(`Time budget: ${block.timeLimit.minutes}m / ${block.timeLimit.periodHours}h ready`);
+    }
+  }
+  if (block.snooze && block.snooze.enabled) {
+    if (rt.state === 'snooze') {
+      parts.push(`Snooze active: ${formatDuration(rt.remainingMs)} left`);
+    } else {
+      parts.push(`Snoozes: ${rt.snoozesLeft}/${rt.snoozeMax} available`);
+    }
+  }
+  return parts.join(' · ');
+}
+
+function blockHtml(block, now) {
+  const locked = isBlockLocked(block, now);
+  const active = isBlockActive(block, now, config, runtime);
+  const disabledAttr = locked ? 'disabled' : '';
+  const rt = deriveBlockRuntime(block, blockStates[block.id], now);
+  const end = locked ? scheduleBlockingEnd(new Date(now), block.schedule) : null;
+
+  let badgeText = 'Inactive';
+  let badgeClass = '';
+  if (locked) {
+    badgeText = end ? `Locked until ${formatClockTime(end)}` : 'Locked 24/7';
+    badgeClass = 'locked';
+  } else if (active) {
+    badgeText = 'Active';
+    badgeClass = 'active';
+  } else if (!block.enabled) {
+    badgeText = 'Disabled';
+  }
+
+  const sitesHtml = (block.sites || []).map((s) => siteCardHtml(s, disabledAttr)).join('');
+  const alwaysActive = Boolean(block.schedule && block.schedule.alwaysActive);
+  const windowsHtml = ((block.schedule && block.schedule.windows) || [])
+    .map((w) => windowRowHtml(w, disabledAttr))
+    .join('');
+
+  const tl = block.timeLimit || { enabled: false, minutes: 20, periodHours: 8 };
+  const sn = block.snooze || { enabled: false, durationMinutes: 5, maxCount: 1, periodHours: 4 };
+  const rtSummary = runtimeSummaryForBlock(block, rt);
+
+  return `
+    <div class="block-card ${locked ? 'locked' : ''}" data-block-id="${escapeHtml(block.id)}">
+      <div class="block-head">
+        <div class="block-title-row">
+          <input type="text" class="block-name" value="${escapeHtml(block.name)}" placeholder="Block name" maxlength="60" ${disabledAttr}>
+          <span class="block-status-badge ${badgeClass}">${escapeHtml(badgeText)}</span>
+        </div>
+        <div class="block-controls">
+          <label class="check-row">
+            <input type="checkbox" class="block-enabled" ${block.enabled ? 'checked' : ''} ${disabledAttr}>
+            <span>Enabled</span>
+          </label>
+          <label class="check-row" title="Cannot be edited, disabled, or deleted while active during scheduled hours">
+            <input type="checkbox" class="block-persistent" ${block.persistent ? 'checked' : ''} ${disabledAttr}>
+            <span>Persistent mode</span>
+          </label>
+          <button type="button" class="btn btn-small btn-danger" data-action="delete-block" ${disabledAttr}>Delete</button>
+        </div>
+      </div>
+
+      ${rtSummary ? `<div class="block-runtime-bar">${escapeHtml(rtSummary)}</div>` : ''}
+
+      <div class="block-subsection">
+        <div class="block-subsection-head">
+          <h3>Websites (${(block.sites || []).length})</h3>
+          <div class="add-domain">
+            <input type="text" class="new-site-domain" placeholder="example.com" spellcheck="false" autocomplete="off" ${disabledAttr}>
+            <button type="button" class="btn btn-small btn-primary" data-action="add-site" ${disabledAttr}>Add site</button>
+          </div>
+        </div>
+        <div class="sites-list">${sitesHtml}</div>
+        <p class="muted small sites-empty ${(block.sites || []).length > 0 ? 'hidden' : ''}">No websites in this block yet.</p>
+      </div>
+
+      <div class="block-subsection">
+        <div class="block-subsection-head">
+          <h3>Schedule</h3>
+          <label class="check-row">
+            <input type="checkbox" class="block-always-active" ${alwaysActive ? 'checked' : ''} ${disabledAttr}>
+            <span>24/7 (Always active)</span>
+          </label>
+        </div>
+        <div class="windows-list ${alwaysActive ? 'hidden' : ''}">
+          ${windowsHtml}
+        </div>
+        <div class="${alwaysActive ? 'hidden' : ''}">
+          <button type="button" class="btn btn-small range-add" data-action="add-window" ${disabledAttr}>+ Add time window</button>
+        </div>
+      </div>
+
+      <div class="block-subsection">
+        <h3>Time limit &amp; Snooze</h3>
+        <div class="rules-grid">
+          <div class="rule-row">
+            <label class="check-row">
+              <input type="checkbox" class="limit-enabled" ${tl.enabled ? 'checked' : ''} ${disabledAttr}>
+              <span>Global time limit <span class="muted">— total active browsing time shared across all sites in this block</span></span>
+            </label>
+            <div class="rule-inputs">
+              <span>Allow</span>
+              <input type="number" class="num-input limit-minutes" min="1" max="1440" step="1" value="${tl.minutes}" ${locked || !tl.enabled ? 'disabled' : ''}>
+              <span>minutes every</span>
+              <input type="number" class="num-input limit-hours" min="0.5" max="168" step="0.5" value="${tl.periodHours}" ${locked || !tl.enabled ? 'disabled' : ''}>
+              <span>hours</span>
+            </div>
+          </div>
+          <div class="rule-row">
+            <label class="check-row">
+              <input type="checkbox" class="snooze-enabled" ${sn.enabled ? 'checked' : ''} ${disabledAttr}>
+              <span>Snooze <span class="muted">— temporary bypass (continuous wall-clock time from activation)</span></span>
+            </label>
+            <div class="rule-inputs">
+              <span>Duration</span>
+              <input type="number" class="num-input snooze-duration" min="1" max="180" step="1" value="${sn.durationMinutes}" ${locked || !sn.enabled ? 'disabled' : ''}>
+              <span>min · max</span>
+              <input type="number" class="num-input snooze-max" min="1" max="100" step="1" value="${sn.maxCount}" ${locked || !sn.enabled ? 'disabled' : ''}>
+              <span>every</span>
+              <input type="number" class="num-input snooze-hours" min="0.5" max="168" step="0.5" value="${sn.periodHours}" ${locked || !sn.enabled ? 'disabled' : ''}>
+              <span>hours</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
+function renderBlocks() {
+  const now = Date.now();
+  const list = el('blocks-list');
+  list.innerHTML = (config.blocks || []).map((b) => blockHtml(b, now)).join('');
+  el('blocks-empty').classList.toggle('hidden', (config.blocks || []).length > 0);
 }
 
 function renderWallpaper() {
@@ -309,39 +423,38 @@ async function persistConfig(nextConfig) {
 }
 
 function collectDraft() {
-  const groups = collectGroupsFromDom([...document.querySelectorAll('.group')], newGroupId);
-  const { windows, errors } = collectScheduleFromDom([...document.querySelectorAll('.day-row')]);
+  const { blocks, scheduleErrors } = collectBlocksFromDom(
+    [...document.querySelectorAll('.block-card')],
+    { makeBlockId: newBlockId, makeSiteId: newSiteId },
+  );
+  const antiUninstall = { enabled: Boolean(el('anti-uninstall-enabled').checked) };
   return {
-    config: { ...config, groups, schedule: { windows } },
-    scheduleErrors: errors,
+    config: { ...config, antiUninstall, blocks },
+    scheduleErrors,
   };
 }
 
 async function saveAll() {
-  const statusEl = el('save-status');
   const draft = collectDraft();
   if (draft.scheduleErrors.length > 0) {
-    statusEl.textContent = draft.scheduleErrors[0].message;
-    statusEl.className = 'save-error';
+    showStatus(draft.scheduleErrors[0].message);
     return;
   }
   const result = await persistConfig(draft.config);
   if (!result.ok) {
-    statusEl.textContent = result.errors[0] || 'Could not save';
-    statusEl.className = 'save-error';
+    showStatus(result.errors[0] || 'Could not save');
     return;
   }
   dirty = false;
-  statusEl.textContent = 'Saved — stay awesome';
-  statusEl.className = 'save-ok';
-  renderGroups();
-  renderSchedule();
-  renderStatus();
+  showStatus('Saved — synced across devices', 'save-ok');
+  await loadState();
+  renderAll();
 }
 
-async function onAddDomain() {
-  const input = el('new-domain');
-  const raw = input.value.trim();
+function addSiteToBlockCard(card) {
+  if (!card || card.classList.contains('locked')) return;
+  const input = card.querySelector('.new-site-domain');
+  const raw = input ? input.value.trim() : '';
   if (!raw) return;
   const parsed = normalizeHostname(raw);
   if (!parsed.ok) {
@@ -349,54 +462,155 @@ async function onAddDomain() {
     return;
   }
   const domain = parsed.hostname;
-  const draft = collectDraft();
-  if (draft.config.groups.some((g) => normalizeHostname(g.domain).hostname === domain)) {
-    showStatus(`${domain} is already in a group`);
+  const existing = [...card.querySelectorAll('.site-domain')].some((elDomain) => {
+    const res = normalizeHostname(elDomain.value);
+    return res.ok ? res.hostname === domain : elDomain.value.trim() === domain;
+  });
+  if (existing) {
+    showStatus(`${domain} is already in this block`);
     return;
   }
-  draft.config.groups.push({
-    id: newGroupId(),
+  const site = {
+    id: newSiteId(),
     domain,
     includeBaseHost: true,
     includeAllSubdomains: false,
     subdomains: [],
     whitelist: [],
-    level: 'total',
+  };
+  card.querySelector('.sites-list').insertAdjacentHTML('beforeend', siteCardHtml(site, ''));
+  card.querySelector('.sites-empty').classList.add('hidden');
+  updateSiteCountHeading(card);
+  input.value = '';
+  markDirty();
+  showStatus(`Added ${domain} (unsaved)`, 'save-ok');
+}
+
+function updateSiteCountHeading(card) {
+  const count = card.querySelectorAll('.site-card').length;
+  const heading = card.querySelector('.block-subsection h3');
+  if (heading && heading.textContent.startsWith('Websites')) {
+    heading.textContent = `Websites (${count})`;
+  }
+  const emptyHint = card.querySelector('.sites-empty');
+  if (emptyHint) emptyHint.classList.toggle('hidden', count > 0);
+}
+
+async function onQuickBlock(domain) {
+  const parsed = normalizeHostname(domain);
+  const host = parsed.ok ? parsed.hostname : domain;
+  const draft = collectDraft();
+  const alreadyBlocked = draft.config.blocks.some((b) => (b.sites || []).some((s) => {
+    const existing = normalizeHostname(s.domain);
+    return existing.ok ? existing.hostname === host : s.domain === host;
+  }));
+  if (alreadyBlocked) {
+    activateTab('blocks');
+    return;
+  }
+
+  const now = Date.now();
+  let targetBlock = draft.config.blocks.find((b) => !isBlockLocked(b, now));
+  if (!targetBlock) {
+    targetBlock = defaultBlock(draft.config.blocks.length);
+    draft.config.blocks.push(targetBlock);
+  }
+  targetBlock.sites.push({
+    id: newSiteId(),
+    domain: host,
+    includeBaseHost: true,
+    includeAllSubdomains: false,
+    subdomains: [],
+    whitelist: [],
   });
   config = draft.config;
-  input.value = '';
-  renderGroups();
+  renderBlocks();
   markDirty();
-  showStatus(`Added ${domain} — covers http/https and www/non-www (unsaved)`, 'save-ok');
+  activateTab('blocks');
+  const card = document.querySelector(`.block-card[data-block-id="${targetBlock.id}"]`);
+  if (card) {
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.classList.add('flash');
+    setTimeout(() => card.classList.remove('flash'), 1600);
+  }
 }
 
 async function onMasterToggle() {
-  const status = computeStatus(config, runtime, Date.now());
+  const status = computeStatus(config, runtime, Date.now(), blockStates);
   if (!status.blockingActive) {
-    if (status.inSchedule && status.overrideActive) {
+    if (status.hasNonPersistentScheduled && status.overrideActive) {
       await sendMessage({ type: 'override:clear' });
     } else {
       await sendMessage({ type: 'master:set', enabled: true });
     }
     await loadState();
     renderStatus();
+    renderBlocks();
     return;
   }
-  if (status.inSchedule && !status.overrideActive) {
+  if (status.hasNonPersistentScheduled && !status.overrideActive) {
     createReflectionModal({
       document,
       onConfirm: async () => {
         await sendMessage({ type: 'override:off' });
         await loadState();
         renderStatus();
+        renderBlocks();
       },
       onCancel: () => renderStatus(),
     });
     return;
   }
-  await sendMessage({ type: 'master:set', enabled: false });
+  const res = await sendMessage({ type: 'master:set', enabled: false });
+  if (res && !res.ok && res.error === 'persistent-locked') {
+    showStatus('Active persistent blocks cannot be turned off during scheduled hours');
+    return;
+  }
   await loadState();
   renderStatus();
+  renderBlocks();
+}
+
+function addChipFromInput(input) {
+  if (!input) return;
+  const raw = input.value.trim();
+  if (!raw) return;
+  const kind = input.dataset.chipKind;
+  let value = raw;
+
+  if (kind === 'subdomain') {
+    const parsed = normalizeHostname(raw);
+    if (!parsed.ok) {
+      showStatus(`"${raw}" is not a valid host — ${parsed.error}`);
+      return;
+    }
+    value = parsed.hostname;
+    const siteCard = input.closest('.site-card');
+    const domainInput = siteCard && siteCard.querySelector('.site-domain');
+    const siteDomain = domainInput ? normalizeHostname(domainInput.value) : null;
+    if (siteDomain && siteDomain.ok && siteDomain.hostname === value) {
+      showStatus(`${value} is already covered by this site's host`);
+      return;
+    }
+  } else if (kind === 'whitelist') {
+    const parsed = compilePathGlob(raw);
+    if (!parsed.ok) {
+      showStatus(`"${raw}" is not a valid path — ${parsed.error}`);
+      return;
+    }
+    value = parsed.normalized;
+  }
+
+  const chips = input.parentElement.querySelectorAll(`.chip[data-kind="${kind}"]`);
+  for (const chip of chips) {
+    if (chip.dataset.value === value) {
+      input.value = '';
+      return;
+    }
+  }
+  input.insertAdjacentHTML('beforebegin', chipHtml(kind, value, ''));
+  input.value = '';
+  markDirty();
 }
 
 function wireEvents() {
@@ -451,64 +665,95 @@ function wireEvents() {
     if (result.ok) renderStatsSettings();
   });
 
-  el('btn-add-domain').addEventListener('click', onAddDomain);
-  el('new-domain').addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') onAddDomain();
+  el('anti-uninstall-enabled').addEventListener('change', markDirty);
+
+  el('btn-add-block').addEventListener('click', () => {
+    const draft = collectDraft();
+    const next = defaultBlock(draft.config.blocks.length);
+    draft.config.blocks.push(next);
+    config = draft.config;
+    renderBlocks();
+    markDirty();
+    const card = document.querySelector(`.block-card[data-block-id="${next.id}"]`);
+    if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
   });
 
   el('master-toggle').addEventListener('click', onMasterToggle);
 
-  el('groups-list').addEventListener('click', (event) => {
+  el('blocks-list').addEventListener('click', (event) => {
     const button = event.target.closest('button');
-    if (!button) return;
+    if (!button || button.disabled) return;
+    const card = button.closest('.block-card');
+    if (!card) return;
     const action = button.dataset.action;
-    if (action === 'remove-chip') {
+
+    if (action === 'delete-block') {
+      if (card.classList.contains('locked')) return;
+      card.remove();
+      el('blocks-empty').classList.toggle('hidden', document.querySelectorAll('.block-card').length > 0);
+      markDirty();
+    } else if (action === 'add-site') {
+      addSiteToBlockCard(card);
+    } else if (action === 'remove-site') {
+      button.closest('.site-card').remove();
+      updateSiteCountHeading(card);
+      markDirty();
+    } else if (action === 'remove-chip') {
       button.closest('.chip').remove();
       markDirty();
     } else if (action === 'add-chip') {
       const input = button.parentElement.querySelector('.chip-input');
       addChipFromInput(input);
-    } else if (action === 'delete-group') {
-      const card = button.closest('.group');
-      card.remove();
-      el('groups-empty').classList.toggle('hidden', document.querySelectorAll('.group').length > 0);
+    } else if (action === 'add-window') {
+      const list = card.querySelector('.windows-list');
+      list.insertAdjacentHTML('beforeend', windowRowHtml({ days: [1, 2, 3, 4, 5], start: '09:00', end: '17:00' }, ''));
       markDirty();
-    } else if (button.dataset.level) {
-      const card = button.closest('.group');
-      card.querySelectorAll('.level-pill').forEach((pill) => {
-        pill.classList.toggle('on', pill === button);
-      });
+    } else if (action === 'remove-window') {
+      button.closest('.window-row').remove();
+      markDirty();
+    } else if (action === 'toggle-day') {
+      button.classList.toggle('on');
       markDirty();
     }
   });
 
-  el('groups-list').addEventListener('keydown', (event) => {
-    if (event.key === 'Enter' && event.target.classList.contains('chip-input')) {
+  el('blocks-list').addEventListener('change', (event) => {
+    const target = event.target;
+    const card = target.closest('.block-card');
+    if (!card) return;
+
+    if (target.classList.contains('block-always-active')) {
+      const hideWindows = target.checked;
+      card.querySelector('.windows-list').classList.toggle('hidden', hideWindows);
+      card.querySelector('[data-action="add-window"]').parentElement.classList.toggle('hidden', hideWindows);
+    } else if (target.classList.contains('limit-enabled')) {
+      const on = target.checked;
+      card.querySelector('.limit-minutes').disabled = !on;
+      card.querySelector('.limit-hours').disabled = !on;
+    } else if (target.classList.contains('snooze-enabled')) {
+      const on = target.checked;
+      card.querySelector('.snooze-duration').disabled = !on;
+      card.querySelector('.snooze-max').disabled = !on;
+      card.querySelector('.snooze-hours').disabled = !on;
+    }
+    markDirty();
+  });
+
+  el('blocks-list').addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    if (event.target.classList.contains('new-site-domain')) {
+      event.preventDefault();
+      addSiteToBlockCard(event.target.closest('.block-card'));
+    } else if (event.target.classList.contains('chip-input')) {
+      event.preventDefault();
       addChipFromInput(event.target);
     }
   });
 
-  el('groups-list').addEventListener('input', markDirty);
-
-  el('schedule-editor').addEventListener('click', (event) => {
-    const button = event.target.closest('button');
-    if (!button) return;
-    if (button.dataset.action === 'add-range') {
-      const ranges = button.parentElement;
-      ranges.insertAdjacentHTML('afterbegin', scheduleRangeHtml('09:00', '17:00'));
-      markDirty();
-    } else if (button.dataset.action === 'remove-range') {
-      button.closest('.schedule-range').remove();
+  el('blocks-list').addEventListener('input', (event) => {
+    if (!event.target.classList.contains('new-site-domain') && !event.target.classList.contains('chip-input')) {
       markDirty();
     }
-  });
-
-  el('schedule-editor').addEventListener('input', markDirty);
-
-  el('btn-clear-schedule').addEventListener('click', () => {
-    config = { ...config, schedule: { windows: [] } };
-    renderSchedule();
-    markDirty();
   });
 
   el('btn-save').addEventListener('click', saveAll);
@@ -527,8 +772,7 @@ function wireEvents() {
   el('btn-custom-wallpaper').addEventListener('click', async () => {
     const value = el('custom-wallpaper-url').value.trim();
     if (!/^https?:\/\//.test(value)) {
-      el('save-status').textContent = 'Wallpaper URL must start with http(s)://';
-      el('save-status').className = 'save-error';
+      showStatus('Wallpaper URL must start with http(s)://');
       return;
     }
     const result = await persistConfig({ ...config, wallpaper: { mode: 'url', value } });
@@ -536,8 +780,7 @@ function wireEvents() {
       renderWallpaper();
       renderStatus();
     } else {
-      el('save-status').textContent = result.errors[0];
-      el('save-status').className = 'save-error';
+      showStatus(result.errors[0]);
     }
   });
 
@@ -546,19 +789,27 @@ function wireEvents() {
   });
 
   chrome.storage.onChanged.addListener(async (changes, area) => {
-    if (area === 'sync' && changes[STORAGE_KEYS.CONFIG]) {
-      if (dirty) return;
+    if (area === 'sync') {
+      const keys = Object.keys(changes);
+      const configChanged = keys.some((k) => k === STORAGE_KEYS.CONFIG || k.startsWith(STORAGE_KEYS.BLOCK_PREFIX));
+      const stateChanged = keys.some((k) => k.startsWith(STORAGE_KEYS.BLOCK_STATE_PREFIX));
+      if (!configChanged && !stateChanged) return;
+      if (dirty && configChanged) return;
       await loadState();
-      renderGroups();
-      renderSchedule();
-      renderWallpaper();
-      renderStatsSettings();
+      renderStatus();
+      renderProtection();
+      if (!dirty) renderBlocks();
+      if (configChanged) {
+        renderWallpaper();
+        renderStatsSettings();
+      }
       return;
     }
     if (area !== 'local') return;
     if (changes[STORAGE_KEYS.RUNTIME]) {
       await loadState();
       renderStatus();
+      if (!dirty) renderBlocks();
     }
     const statsChanged = Object.keys(changes).some((key) => key.startsWith(STATS.DAY_KEY_PREFIX));
     if (statsChanged && activeTab === 'stats') {
@@ -567,53 +818,11 @@ function wireEvents() {
   });
 }
 
-function addChipFromInput(input) {
-  if (!input) return;
-  const raw = input.value.trim();
-  if (!raw) return;
-  const kind = input.dataset.chipKind;
-  let value = raw;
-
-  if (kind === 'subdomain') {
-    const parsed = normalizeHostname(raw);
-    if (!parsed.ok) {
-      showStatus(`"${raw}" is not a valid host — ${parsed.error}`);
-      return;
-    }
-    value = parsed.hostname;
-    const card = input.closest('.group');
-    const domainInput = card && card.querySelector('.group-domain');
-    const groupDomain = domainInput ? normalizeHostname(domainInput.value) : null;
-    if (groupDomain && groupDomain.ok && groupDomain.hostname === value) {
-      showStatus(`${value} is already covered by this group's host`);
-      return;
-    }
-  } else if (kind === 'whitelist') {
-    const parsed = compilePathGlob(raw);
-    if (!parsed.ok) {
-      showStatus(`"${raw}" is not a valid path — ${parsed.error}`);
-      return;
-    }
-    value = parsed.normalized;
-  }
-
-  const chips = input.parentElement.querySelectorAll(`.chip[data-kind="${kind}"]`);
-  for (const chip of chips) {
-    if (chip.dataset.value === value) {
-      input.value = '';
-      return;
-    }
-  }
-  input.insertAdjacentHTML('beforebegin', chipHtml(kind, value));
-  input.value = '';
-  markDirty();
-}
-
 async function init() {
   await loadState();
   renderAll();
   wireEvents();
-  activateTab((location.hash || '#sites').slice(1));
+  activateTab((location.hash || '#blocks').slice(1));
   setInterval(renderStatus, 1000);
   setInterval(() => {
     if (activeTab === 'stats') renderStats();

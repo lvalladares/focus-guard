@@ -67,6 +67,32 @@ function specSpecificity(spec) {
   return spec.kind === 'exact' ? 2 : 1;
 }
 
+export function matchSiteInList(url, sites) {
+  const parsed = safeParseUrl(url);
+  if (!parsed || !parsed.hostname) return null;
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+  const hostname = parsed.hostname;
+  let best = null;
+  for (const site of sites || []) {
+    for (const spec of hostSpecsForGroup(site)) {
+      if (!hostnameMatchesSpec(hostname, spec)) continue;
+      const specificity = specSpecificity(spec) + (spec.kind === 'wildcard' ? spec.base.split('.').length : 0) * 0.01;
+      const whitelisted = isWhitelistedUrl(parsed, site);
+      // At equal specificity within the same block, a non-whitelisted rule is more restrictive.
+      const isBetter = !best
+        || specificity > best.specificity
+        || (specificity === best.specificity && !whitelisted && best.whitelisted);
+      if (isBetter) best = { site, spec, specificity, whitelisted };
+    }
+  }
+  return best;
+}
+
+export function matchSiteInBlock(url, block) {
+  if (!block || !Array.isArray(block.sites)) return null;
+  return matchSiteInList(url, block.sites);
+}
+
 export function matchGroupForUrl(url, config) {
   const parsed = safeParseUrl(url);
   if (!parsed || !parsed.hostname) return null;
@@ -180,6 +206,14 @@ export function groupMatchPatterns(group) {
     } else {
       patterns.push(`*://*.${stripWwwPrefix(spec.base)}/*`);
     }
+  }
+  return [...new Set(patterns)];
+}
+
+export function blockMatchPatterns(block) {
+  const patterns = [];
+  for (const site of (block && block.sites) || []) {
+    patterns.push(...groupMatchPatterns(site));
   }
   return [...new Set(patterns)];
 }
